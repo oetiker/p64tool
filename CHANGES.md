@@ -8,6 +8,14 @@ workflow.
 
 ### New
 
+### Changed
+
+### Fixed
+
+## 0.1.0 - 2026-07-14
+
+### New
+
 - Read the full P64 / P4 codeplug over the serial programming cable (`read`),
   and a quick liveness check (`info`).
 - Decode a dump into an editable TOML config (`decode`) and validate it against
@@ -20,7 +28,6 @@ workflow.
   (ARC4/AES128/AES256, openssl-compatible hex).
 - `--comments` annotates the config; `--expert` reveals fixed/advanced fields
   (frequencies, timeslot, bandwidth, DMR service internals).
-
 ### Changed
 
 ### Fixed
