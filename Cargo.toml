@@ -1,0 +1,18 @@
+[package]
+name = "p64tool"
+version = "0.1.0"
+edition = "2021"
+description = "Linux programming tool for the Retevis MateTalk P64 / P4 DMR radio"
+license = "MIT"
+authors = ["Tobi Oetiker"]
+repository = "https://github.com/oetiker/p64tool"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+strip = true

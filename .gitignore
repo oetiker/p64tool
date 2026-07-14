@@ -1,0 +1,16 @@
+# Rust build output
+/target
+
+# Build artifacts (ship these via GitHub Releases, not the repo)
+p64tool-x86_64-static
+*.exe
+
+# Do NOT commit Retevis-copyrighted files (CPS binary, installer, data files)
+*.dat
+
+# Personal / device data: real codeplug reads contain the radio's serial number
+# and factory config — keep them out of a public repo.
+mydump/
+p64-dump/
+*.p64
+radio.toml
