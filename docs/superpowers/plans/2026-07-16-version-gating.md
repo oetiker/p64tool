@@ -536,78 +536,24 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 6: Gate `write` on identity (hard block / soft warn) + flag
+### Task 6: Gate `write` on identity (read-only pre-check) + flag
+
+**Design note (supersedes an earlier draft):** the identity gate is a **read-only
+pre-check at the very start of `write_radio`, before the `--yes` confirmation** — NOT
+inside `write_all` (which only runs after `--yes`). This way a wrong model is refused
+immediately, the verdict prints on a dry run, and it can be validated with no write.
+`proto::probe_identity`, `identity::from_probe`, and `identity::write_decision`
+already exist (Tasks 3–5); `write_all` is unchanged.
 
 **Files:**
-- Modify: `src/proto.rs` (`write_all` signature), `src/main.rs` (`Write` subcommand: add flag; `write_radio`: build + pass the gate)
+- Modify: `src/main.rs` (`Write` subcommand: add flag; `write_radio`: add the pre-check + a param), `src/identity.rs` (remove now-unnecessary dead_code allows).
 
 **Interfaces:**
-- Consumes: `identity::{DeviceIdentity, write_decision, WriteDecision}`, `identity::r01_model_label`, `proto::RawMcuInfo`.
-- Produces: `proto::write_all(port, frames, verbose, gate: impl FnOnce(&RawMcuInfo) -> Result<()>)`.
+- Consumes: `proto::probe_identity`, `identity::{from_probe, write_decision, WriteDecision}`.
 
-- [ ] **Step 1: Add the in-session gate to `write_all`**
+- [ ] **Step 1: Add the `--require-known-version` flag and thread it through**
 
-In `src/proto.rs`, change the `write_all` signature and call the gate right after a successful CONNECT, inside the disconnect-guarded closure:
-
-```rust
-pub fn write_all(
-    port: &Serial,
-    frames: &[(String, Vec<u8>)],
-    verbose: bool,
-    gate: impl FnOnce(&RawMcuInfo) -> Result<()>,
-) -> Result<()> {
-    eprintln!("Connecting...");
-    let reply = transact(port, CONNECT, CONNECT_REPLY_LEN, verbose)?;
-    if !reply.starts_with(CONNECT_REPLY_PREFIX) {
-        bail!(
-            "connect handshake failed (got {} bytes). Radio on? Right --port?",
-            reply.len()
-        );
-    }
-
-    let result = (|| -> Result<()> {
-        // Identity gate BEFORE any region write.
-        let mcu = mcu_get(port, verbose)?;
-        gate(&mcu)?;
-        eprintln!("Identity OK ({} fw {}). Writing {} regions...", mcu.mcu_name, mcu.firmware, frames.len());
-        for (label, frame) in frames {
-            eprint!("  {label} ({} bytes) ... ", frame.len());
-            port.flush_input()?;
-            if verbose {
-                eprintln!();
-                eprintln!("    -> head {}", hex(&frame[..frame.len().min(16)]));
-            }
-            for chunk in frame.chunks(1024) {
-                port.write_all(chunk)?;
-            }
-            let ack = port.read_response(
-                19,
-                std::time::Duration::from_millis(300),
-                std::time::Duration::from_millis(4000),
-            )?;
-            if !ack.starts_with(WRITE_ACK_PREFIX) {
-                bail!(
-                    "no write ACK for {label} (got {} bytes: {})",
-                    ack.len(),
-                    hex(&ack[..ack.len().min(19)])
-                );
-            }
-            eprintln!("ACK");
-        }
-        Ok(())
-    })();
-
-    eprintln!("Disconnecting...");
-    let _ = transact(port, DISCONNECT, DISCONNECT_REPLY_PREFIX.len() + 4, verbose);
-    result
-}
-```
-
-(This replaces the old body; the `eprintln!("Connected. Writing …")` line moves into the closure as shown.)
-
-- [ ] **Step 2: Add the `--require-known-version` flag**
-
-In `src/main.rs`, in the `Write` variant of `enum Cmd`, add after `no_verify`:
+In `src/main.rs`, in the `Write` variant of `enum Cmd`, add after the `no_verify` field:
 
 ```rust
         /// Refuse to write if the device firmware is not in p64tool's validated set
@@ -615,60 +561,66 @@ In `src/main.rs`, in the `Write` variant of `enum Cmd`, add after `no_verify`:
         require_known_version: bool,
 ```
 
-Thread it through the `Cmd::Write { .. }` match arm and the `write_radio(...)` signature (add `require_known_version: bool` as a parameter, passed after `no_verify`).
+Add `require_known_version` to the `Cmd::Write { .. }` destructure in `main()` and
+pass it to `write_radio(...)`. Add a `require_known_version: bool` parameter to the
+`write_radio(...)` signature (place it after `no_verify: bool`).
 
-- [ ] **Step 3: Build the gate closure in `write_radio`**
+- [ ] **Step 2: Add the read-only identity pre-check at the top of `write_radio`**
 
-In `src/main.rs`, just before the `let s = serial::Serial::open(port)?; proto::write_all(...)` call in `write_radio`, compute the base model label and build the closure. Replace the `proto::write_all(&s, &frames, verbose)?;` call with:
+In `src/main.rs`, insert this as the FIRST statements inside `write_radio`, before the
+existing `// 1. Obtain the base codeplug` block:
 
 ```rust
-    // Identity gate: read the base codeplug's r01 model label for the version check.
-    let base_label = {
-        let payload = cp.region("r01")?.payload().to_vec();
-        let l = identity::r01_model_label(&payload);
-        (!l.is_empty()).then_some(l)
-    };
-    let require_known = require_known_version;
-    let gate = move |mcu: &proto::RawMcuInfo| -> Result<()> {
-        let id = identity::DeviceIdentity {
-            mcu_name: mcu.mcu_name.clone(),
-            firmware: mcu.firmware.clone(),
-            build_date: mcu.build_date.clone(),
-            model_label: base_label.clone(),
-        };
-        match identity::write_decision(&id, require_known) {
-            identity::WriteDecision::Proceed(None) => Ok(()),
-            identity::WriteDecision::Proceed(Some(warn)) => {
-                println!("WARNING: {warn} — proceeding (use --require-known-version to refuse).");
-                Ok(())
-            }
-            identity::WriteDecision::Block(msg) => {
-                anyhow::bail!("refusing to write: {msg}")
-            }
+    // 0. Identity pre-check (read-only): confirm this radio is one whose codeplug
+    //    layout p64tool understands, BEFORE reading/applying/writing anything.
+    {
+        let s = serial::Serial::open(port)?;
+        let (mcu, r01) = proto::probe_identity(&s, verbose)?;
+        let id = identity::from_probe(mcu, &r01);
+        match identity::write_decision(&id, require_known_version) {
+            identity::WriteDecision::Proceed(None) => println!(
+                "Device identity OK: {} fw {} ({})",
+                id.mcu_name,
+                id.firmware,
+                id.model_label.as_deref().unwrap_or("?")
+            ),
+            identity::WriteDecision::Proceed(Some(warn)) => println!(
+                "WARNING: {warn} — proceeding (use --require-known-version to refuse)."
+            ),
+            identity::WriteDecision::Block(msg) => anyhow::bail!("refusing to write: {msg}"),
         }
-    };
-
-    let s = serial::Serial::open(port)?;
-    proto::write_all(&s, &frames, verbose, gate)?;
+    }
 ```
+
+The rest of `write_radio` (obtain base, apply, build frames, `--yes` gate, `write_all`,
+verify) is unchanged.
+
+- [ ] **Step 3: Remove now-unnecessary dead_code allows**
+
+Wiring the pre-check makes `identity::write_decision` and `identity::WriteDecision`
+used. Remove their `#[allow(dead_code)]` attributes in `src/identity.rs`. After this
+task NO `#[allow(dead_code)]` should remain anywhere in `src/identity.rs` or
+`src/proto.rs` — verify by building; an allow on a now-used item fails `-D warnings`.
 
 - [ ] **Step 4: Verify it compiles and unit tests pass**
 
-Run: `cargo test -j4 && cargo clippy -j4 --all-targets -- -D warnings`
+Run: `cargo test -j4 && cargo clippy -j4 --all-targets -- -D warnings && cargo fmt --check`
 Expected: builds, all tests pass (the decision logic is covered by Task 3), no warnings.
 
-- [ ] **Step 5: Manual hardware validation (needs the radio)**
+- [ ] **Step 5: Manual hardware validation (controller runs against the real radio)**
 
-Run an identity write on the V1.1 radio:
-`cargo run -j4 -- write --port /dev/ttyUSB0 --all` (dry-run: no `--yes` yet)
-Expected: prints `Identity OK (…DM5… fw 1.0.0.0)` before the "About to write …" gate.
-Then confirm the safety: it must still require `--yes` to actually write. Do NOT pass `--yes` unless you intend to reprogram the radio.
+The controller (not the implementer) runs this against the P64:
+`p64tool write --port /dev/ttyUSB0 --all` **(dry-run: no `--yes`)**
+Expected: prints `Device identity OK: DM5 fw 1.0.0.0 (P64 V1.1)` (the read-only
+pre-check), then the base read + `About to write … Re-run with --yes to proceed.`, and
+exits WITHOUT writing. This is safe — no `--yes`, so no write occurs. Do NOT pass
+`--yes` (that would reprogram the radio) unless the user explicitly authorises it.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/proto.rs src/main.rs
-git commit -m "feat(write): gate on live device identity before writing
+git add src/main.rs src/identity.rs
+git commit -m "feat(write): read-only identity pre-check before writing
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
