@@ -74,14 +74,12 @@ pub fn gate(id: &DeviceIdentity) -> GateOutcome {
 }
 
 /// A write-time decision: proceed (optionally with a warning to print) or block.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum WriteDecision {
     Proceed(Option<String>),
     Block(String),
 }
 
-#[allow(dead_code)]
 pub fn write_decision(id: &DeviceIdentity, require_known: bool) -> WriteDecision {
     match gate(id) {
         GateOutcome::Ok => WriteDecision::Proceed(None),

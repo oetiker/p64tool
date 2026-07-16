@@ -95,6 +95,9 @@ enum Cmd {
         /// Skip the read-back verification after writing
         #[arg(long)]
         no_verify: bool,
+        /// Refuse to write if the device firmware is not in p64tool's validated set
+        #[arg(long)]
+        require_known_version: bool,
         #[arg(short, long)]
         verbose: bool,
     },
@@ -122,9 +125,18 @@ fn main() -> Result<()> {
             all,
             yes,
             no_verify,
+            require_known_version,
             verbose,
         } => write_radio(
-            &port, config, from_dump, &country, all, yes, no_verify, verbose,
+            &port,
+            config,
+            from_dump,
+            &country,
+            all,
+            yes,
+            no_verify,
+            require_known_version,
+            verbose,
         ),
     }
 }
@@ -143,8 +155,29 @@ fn write_radio(
     all: bool,
     yes: bool,
     no_verify: bool,
+    require_known_version: bool,
     verbose: bool,
 ) -> Result<()> {
+    // 0. Identity pre-check (read-only): confirm this radio is one whose codeplug
+    //    layout p64tool understands, BEFORE reading/applying/writing anything.
+    {
+        let s = serial::Serial::open(port)?;
+        let (mcu, r01) = proto::probe_identity(&s, verbose)?;
+        let id = identity::from_probe(mcu, &r01);
+        match identity::write_decision(&id, require_known_version) {
+            identity::WriteDecision::Proceed(None) => println!(
+                "Device identity OK: {} fw {} ({})",
+                id.mcu_name,
+                id.firmware,
+                id.model_label.as_deref().unwrap_or("?")
+            ),
+            identity::WriteDecision::Proceed(Some(warn)) => {
+                println!("WARNING: {warn} — proceeding (use --require-known-version to refuse).")
+            }
+            identity::WriteDecision::Block(msg) => anyhow::bail!("refusing to write: {msg}"),
+        }
+    }
+
     // 1. Obtain the base codeplug (a full 13-region image).
     let mut cp = match &from_dump {
         Some(dir) => {
