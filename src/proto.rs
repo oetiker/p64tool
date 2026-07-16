@@ -31,26 +31,17 @@ pub const DISCONNECT_REPLY_PREFIX: &[u8] = &[
 
 /// MCU-GET: reads the live MCU model/firmware/date. Opcode 0x32; carries fixed
 /// MCU memory addresses. Reply is 52 bytes. (Recovered from the decompiled CPS.)
-///
-/// Not yet wired into `main.rs` — a later task in the firmware-version-gating
-/// plan calls this from the read/write flow, hence the blanket `dead_code`
-/// allow below (this crate has no lib target, so `pub` alone doesn't exempt
-/// unused items from the lint).
-#[allow(dead_code)]
 pub const MCU_GET: &[u8] = &[
     95, 95, 46, 0, 0, 50, 0, 38, 2, 0, 0, 7, 34, 0, 0, 0, 137, 135, 82, 121, 0, 0, 0, 0, 104, 25,
     5, 0, 136, 246, 25, 0, 144, 152, 67, 0, 48, 247, 25, 0, 160, 98, 136, 118, 98, 15, 10, 0, 255,
     255, 85, 170, 13, 10,
 ];
-#[allow(dead_code)]
 pub const MCU_GET_REPLY_PREFIX: &[u8] = &[
     0x5F, 0x5F, 0x2E, 0x00, 0x00, 0x26, 0x00, 0x32, 0x02, 0x00, 0x07, 0x00, 0x22, 0x00, 0x00, 0x00,
 ];
-#[allow(dead_code)]
 pub const MCU_GET_REPLY_LEN: usize = 52;
 
 /// Live identity fields from an MCU-GET reply (ASCII, trimmed).
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RawMcuInfo {
     pub mcu_name: String, // reply[16..=27] — contains the model token, e.g. "DM5..."
@@ -67,7 +58,6 @@ fn ascii_field(b: &[u8]) -> String {
 }
 
 /// Parse a 52-byte MCU-GET reply. Offsets are inclusive per the decompiled CPS.
-#[allow(dead_code)]
 pub fn parse_mcu_reply(reply: &[u8]) -> Result<RawMcuInfo> {
     if reply.len() < MCU_GET_REPLY_LEN {
         bail!(
@@ -422,6 +412,49 @@ pub fn read_all(port: &Serial, verbose: bool) -> Result<Vec<RegionData>> {
 
     result?;
     Ok(out)
+}
+
+/// Send MCU-GET within an already-open session and parse the reply.
+///
+/// Not yet wired into `main.rs` — a later task in the firmware-version-gating
+/// plan calls this from the read/write flow, hence the `dead_code` allow.
+#[allow(dead_code)]
+pub fn mcu_get(port: &Serial, verbose: bool) -> Result<RawMcuInfo> {
+    let reply = transact(port, MCU_GET, MCU_GET_REPLY_LEN, verbose)?;
+    parse_mcu_reply(&reply)
+}
+
+/// Read a single region by name within an already-open session (raw framed reply).
+///
+/// Not yet wired into `main.rs` — see `mcu_get` above.
+#[allow(dead_code)]
+pub fn read_region(port: &Serial, name: &str, verbose: bool) -> Result<Vec<u8>> {
+    let r = REGIONS
+        .iter()
+        .find(|r| r.name == name)
+        .ok_or_else(|| anyhow::anyhow!("unknown region {name}"))?;
+    transact(port, &r.command(), r.expected, verbose)
+}
+
+/// Open a session, read the live MCU identity + region r01, then disconnect.
+///
+/// Not yet wired into `main.rs` — see `mcu_get` above.
+#[allow(dead_code)]
+pub fn probe_identity(port: &Serial, verbose: bool) -> Result<(RawMcuInfo, Vec<u8>)> {
+    let reply = transact(port, CONNECT, CONNECT_REPLY_LEN, verbose)?;
+    if !reply.starts_with(CONNECT_REPLY_PREFIX) {
+        bail!(
+            "connect handshake failed (got {} bytes). Radio on? Right --port?",
+            reply.len()
+        );
+    }
+    let result = (|| -> Result<(RawMcuInfo, Vec<u8>)> {
+        let mcu = mcu_get(port, verbose)?;
+        let r01 = read_region(port, "r01", verbose)?;
+        Ok((mcu, r01))
+    })();
+    let _ = transact(port, DISCONNECT, DISCONNECT_REPLY_PREFIX.len() + 4, verbose);
+    result
 }
 
 #[cfg(test)]
