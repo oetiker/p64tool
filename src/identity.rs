@@ -17,7 +17,11 @@ pub struct DeviceIdentity {
 /// (CPS WW01 offset 16; payload = WW - codeplug::WW_TO_PAYLOAD), up to 16 chars.
 pub fn r01_model_label(r01_payload: &[u8]) -> String {
     let off = 16 - codeplug::WW_TO_PAYLOAD; // = 1
-    get_name(r01_payload, off, 16)
+
+    // Bound to what the payload can hold (2 bytes/char) so a short payload
+    // yields a truncated label instead of panicking.
+    let max_chars = (r01_payload.len().saturating_sub(off) / 2).min(16);
+    get_name(r01_payload, off, max_chars)
 }
 
 /// Build a DeviceIdentity from an MCU-GET result plus a raw (framed) r01 region.
@@ -132,6 +136,13 @@ mod tests {
     #[test]
     fn extracts_model_label_from_real_r01() {
         assert_eq!(r01_model_label(&r01_payload()), "P64 V1.1");
+    }
+
+    #[test]
+    fn r01_model_label_short_payload_does_not_panic() {
+        // Too short to hold any label: must return "" rather than panic.
+        assert_eq!(r01_model_label(&[]), "");
+        assert_eq!(r01_model_label(&[0x00]), "");
     }
 
     #[test]

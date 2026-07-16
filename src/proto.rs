@@ -441,6 +441,17 @@ pub fn probe_identity(port: &Serial, verbose: bool) -> Result<(RawMcuInfo, Vec<u
     let result = (|| -> Result<(RawMcuInfo, Vec<u8>)> {
         let mcu = mcu_get(port, verbose)?;
         let r01 = read_region(port, "r01", verbose)?;
+        if r01.len() < 18 || &r01[0..2] != b"\x5f\x5f" {
+            bail!("r01 reply is not a valid frame ({} bytes)", r01.len());
+        }
+        let paylen = u16::from_le_bytes([r01[12], r01[13]]) as usize;
+        if r01.len() < 14 + paylen {
+            bail!(
+                "r01 reply truncated: {} bytes but payload header claims {}",
+                r01.len(),
+                paylen
+            );
+        }
         Ok((mcu, r01))
     })();
     let _ = transact(port, DISCONNECT, DISCONNECT_REPLY_PREFIX.len() + 4, verbose);
