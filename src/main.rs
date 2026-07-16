@@ -6,6 +6,7 @@
 
 mod codeplug;
 mod config;
+mod identity;
 mod proto;
 mod regs;
 mod serial;
