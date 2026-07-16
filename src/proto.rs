@@ -29,6 +29,57 @@ pub const DISCONNECT_REPLY_PREFIX: &[u8] = &[
     0xFF, 0x55,
 ];
 
+/// MCU-GET: reads the live MCU model/firmware/date. Opcode 0x32; carries fixed
+/// MCU memory addresses. Reply is 52 bytes. (Recovered from the decompiled CPS.)
+pub const MCU_GET: &[u8] = &[
+    95, 95, 46, 0, 0, 50, 0, 38, 2, 0, 0, 7, 34, 0, 0, 0, 137, 135, 82, 121, 0, 0, 0, 0, 104, 25,
+    5, 0, 136, 246, 25, 0, 144, 152, 67, 0, 48, 247, 25, 0, 160, 98, 136, 118, 98, 15, 10, 0, 255,
+    255, 85, 170, 13, 10,
+];
+pub const MCU_GET_REPLY_PREFIX: &[u8] = &[
+    0x5F, 0x5F, 0x2E, 0x00, 0x00, 0x26, 0x00, 0x32, 0x02, 0x00, 0x07, 0x00, 0x22, 0x00, 0x00, 0x00,
+];
+pub const MCU_GET_REPLY_LEN: usize = 52;
+
+/// Live identity fields from an MCU-GET reply (ASCII, trimmed).
+#[derive(Debug, Clone)]
+pub struct RawMcuInfo {
+    pub mcu_name: String, // reply[16..=27] — contains the model token, e.g. "DM5..."
+    pub firmware: String, // reply[28..=43] — e.g. "1.0.0.0"
+    pub build_date: String, // reply[44..=47] BCD -> "YYYY-MM-DD"
+}
+
+fn ascii_field(b: &[u8]) -> String {
+    let end = b
+        .iter()
+        .position(|&c| c == 0x00 || c == 0xFF)
+        .unwrap_or(b.len());
+    String::from_utf8_lossy(&b[..end]).trim().to_string()
+}
+
+/// Parse a 52-byte MCU-GET reply. Offsets are inclusive per the decompiled CPS.
+pub fn parse_mcu_reply(reply: &[u8]) -> Result<RawMcuInfo> {
+    if reply.len() < MCU_GET_REPLY_LEN {
+        bail!(
+            "MCU-GET reply too short: {} bytes (want {})",
+            reply.len(),
+            MCU_GET_REPLY_LEN
+        );
+    }
+    if !reply.starts_with(MCU_GET_REPLY_PREFIX) {
+        bail!(
+            "MCU-GET reply has unexpected header: {}",
+            hex(&reply[..reply.len().min(16)])
+        );
+    }
+    let d = &reply[44..=47];
+    Ok(RawMcuInfo {
+        mcu_name: ascii_field(&reply[16..=27]),
+        firmware: ascii_field(&reply[28..=43]),
+        build_date: format!("{:02X}{:02X}-{:02X}-{:02X}", d[0], d[1], d[2], d[3]),
+    })
+}
+
 /// Template for a read command. Bytes [14],[15] carry the 2-byte region selector.
 const READ_TEMPLATE: [u8; 20] = [
     0x5F, 0x5F, 0x0E, 0x00, 0x00, 0x23, 0x00, 0x26, 0x02, 0x00, 0x4D, 0x11, 0x02, 0x00, 0x01, 0x00,
@@ -361,4 +412,78 @@ pub fn read_all(port: &Serial, verbose: bool) -> Result<Vec<RegionData>> {
 
     result?;
     Ok(out)
+}
+
+/// Send MCU-GET within an already-open session and parse the reply.
+pub fn mcu_get(port: &Serial, verbose: bool) -> Result<RawMcuInfo> {
+    let reply = transact(port, MCU_GET, MCU_GET_REPLY_LEN, verbose)?;
+    parse_mcu_reply(&reply)
+}
+
+/// Read a single region by name within an already-open session (raw framed reply).
+pub fn read_region(port: &Serial, name: &str, verbose: bool) -> Result<Vec<u8>> {
+    let r = REGIONS
+        .iter()
+        .find(|r| r.name == name)
+        .ok_or_else(|| anyhow::anyhow!("unknown region {name}"))?;
+    transact(port, &r.command(), r.expected, verbose)
+}
+
+/// Open a session, read the live MCU identity + region r01, then disconnect.
+pub fn probe_identity(port: &Serial, verbose: bool) -> Result<(RawMcuInfo, Vec<u8>)> {
+    let reply = transact(port, CONNECT, CONNECT_REPLY_LEN, verbose)?;
+    if !reply.starts_with(CONNECT_REPLY_PREFIX) {
+        bail!(
+            "connect handshake failed (got {} bytes). Radio on? Right --port?",
+            reply.len()
+        );
+    }
+    let result = (|| -> Result<(RawMcuInfo, Vec<u8>)> {
+        let mcu = mcu_get(port, verbose)?;
+        let r01 = read_region(port, "r01", verbose)?;
+        if r01.len() < 18 || &r01[0..2] != b"\x5f\x5f" {
+            bail!("r01 reply is not a valid frame ({} bytes)", r01.len());
+        }
+        let paylen = u16::from_le_bytes([r01[12], r01[13]]) as usize;
+        if r01.len() < 14 + paylen {
+            bail!(
+                "r01 reply truncated: {} bytes but payload header claims {}",
+                r01.len(),
+                paylen
+            );
+        }
+        Ok((mcu, r01))
+    })();
+    let _ = transact(port, DISCONNECT, DISCONNECT_REPLY_PREFIX.len() + 4, verbose);
+    result
+}
+
+#[cfg(test)]
+mod mcu_tests {
+    use super::*;
+
+    fn sample_reply() -> Vec<u8> {
+        let mut r = vec![0u8; MCU_GET_REPLY_LEN];
+        r[..MCU_GET_REPLY_PREFIX.len()].copy_from_slice(MCU_GET_REPLY_PREFIX);
+        r[16..16 + 6].copy_from_slice(b"DM5abc"); // model [16..=27]
+        r[28..28 + 7].copy_from_slice(b"1.0.0.0"); // firmware [28..=43]
+        r[44..=47].copy_from_slice(&[0x20, 0x25, 0x07, 0x25]); // date -> 2025-07-25
+        r
+    }
+
+    #[test]
+    fn parses_model_firmware_and_date() {
+        let info = parse_mcu_reply(&sample_reply()).unwrap();
+        assert_eq!(info.mcu_name, "DM5abc");
+        assert_eq!(info.firmware, "1.0.0.0");
+        assert_eq!(info.build_date, "2025-07-25");
+    }
+
+    #[test]
+    fn rejects_short_or_wrong_reply() {
+        assert!(parse_mcu_reply(&[0u8; 10]).is_err());
+        let mut bad = sample_reply();
+        bad[0] = 0x00; // break prefix
+        assert!(parse_mcu_reply(&bad).is_err());
+    }
 }

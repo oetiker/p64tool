@@ -6,6 +6,7 @@
 
 mod codeplug;
 mod config;
+mod identity;
 mod proto;
 mod regs;
 mod serial;
@@ -94,6 +95,9 @@ enum Cmd {
         /// Skip the read-back verification after writing
         #[arg(long)]
         no_verify: bool,
+        /// Refuse to write if the device firmware is not in p64tool's validated set
+        #[arg(long)]
+        require_known_version: bool,
         #[arg(short, long)]
         verbose: bool,
     },
@@ -121,9 +125,18 @@ fn main() -> Result<()> {
             all,
             yes,
             no_verify,
+            require_known_version,
             verbose,
         } => write_radio(
-            &port, config, from_dump, &country, all, yes, no_verify, verbose,
+            &port,
+            config,
+            from_dump,
+            &country,
+            all,
+            yes,
+            no_verify,
+            require_known_version,
+            verbose,
         ),
     }
 }
@@ -142,8 +155,29 @@ fn write_radio(
     all: bool,
     yes: bool,
     no_verify: bool,
+    require_known_version: bool,
     verbose: bool,
 ) -> Result<()> {
+    // 0. Identity pre-check (read-only): confirm this radio is one whose codeplug
+    //    layout p64tool understands, BEFORE reading/applying/writing anything.
+    {
+        let s = serial::Serial::open(port)?;
+        let (mcu, r01) = proto::probe_identity(&s, verbose)?;
+        let id = identity::from_probe(mcu, &r01);
+        match identity::write_decision(&id, require_known_version) {
+            identity::WriteDecision::Proceed(None) => println!(
+                "Device identity OK: {} fw {} ({})",
+                id.mcu_name,
+                id.firmware,
+                id.model_label.as_deref().unwrap_or("?")
+            ),
+            identity::WriteDecision::Proceed(Some(warn)) => {
+                println!("WARNING: {warn} — proceeding (use --require-known-version to refuse).")
+            }
+            identity::WriteDecision::Block(msg) => anyhow::bail!("refusing to write: {msg}"),
+        }
+    }
+
     // 1. Obtain the base codeplug (a full 13-region image).
     let mut cp = match &from_dump {
         Some(dir) => {
@@ -312,6 +346,10 @@ fn roundtrip(dump: PathBuf) -> Result<()> {
 
 fn decode(dump: PathBuf, out: PathBuf, country: &str, expert: bool, comments: bool) -> Result<()> {
     let cp = codeplug::Codeplug::from_dump_dir(&dump)?;
+    let label = identity::r01_model_label(cp.region("r01")?.payload());
+    if let Some(note) = identity::unknown_model_note(&label) {
+        eprintln!("NOTE: {note}");
+    }
     let cfg = config::decode(&cp, country, expert)?;
     let mut toml = config::to_toml(&cfg)?;
     if comments {
@@ -360,19 +398,28 @@ fn check(cfg_path: PathBuf, country: Option<String>) -> Result<()> {
 
 fn info(port: &str, verbose: bool) -> Result<()> {
     let s = serial::Serial::open(port)?;
-    let reply = proto::transact(&s, proto::CONNECT, proto::CONNECT_REPLY_LEN, verbose)?;
-    let _ = proto::transact(&s, proto::DISCONNECT, 22, verbose);
-    if reply.starts_with(proto::CONNECT_REPLY_PREFIX) {
-        println!("Radio responded to connect ({} bytes).", reply.len());
-        println!("Reply: {}", proto::hex(&reply));
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "no valid handshake reply ({} bytes: {})",
-            reply.len(),
-            proto::hex(&reply[..reply.len().min(24)])
-        );
+    let (mcu, r01) = proto::probe_identity(&s, verbose)?;
+    let id = identity::from_probe(mcu, &r01);
+    println!("MCU name : {}", id.mcu_name);
+    println!("Firmware : {}", id.firmware);
+    println!("Built    : {}", id.build_date);
+    println!(
+        "Model    : {}",
+        id.model_label.as_deref().unwrap_or("(unknown)")
+    );
+    match identity::gate(&id) {
+        identity::GateOutcome::Ok => println!("Gate     : OK (known P64 layout)"),
+        identity::GateOutcome::UnknownVersion {
+            model_label,
+            firmware,
+        } => {
+            println!("Gate     : WARNING — {model_label}/{firmware} not in p64tool's validated set")
+        }
+        identity::GateOutcome::WrongModel { mcu_name } => {
+            println!("Gate     : REFUSE writes — model {mcu_name:?} is not a P64")
+        }
     }
+    Ok(())
 }
 
 fn read(port: &str, out: PathBuf, verbose: bool) -> Result<()> {
