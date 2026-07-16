@@ -16,7 +16,6 @@ pub struct DeviceIdentity {
 
 /// The codeplug model label, e.g. "P64 V1.1". UTF-16LE at r01 payload offset 1
 /// (CPS WW01 offset 16; payload = WW - codeplug::WW_TO_PAYLOAD), up to 16 chars.
-#[allow(dead_code)]
 pub fn r01_model_label(r01_payload: &[u8]) -> String {
     let off = 16 - codeplug::WW_TO_PAYLOAD; // = 1
     get_name(r01_payload, off, 16)
@@ -43,7 +42,6 @@ pub fn from_probe(mcu: RawMcuInfo, r01_raw: &[u8]) -> DeviceIdentity {
 pub const MODEL_TOKEN: &str = "DM5";
 
 /// (r01 model label, firmware) pairs p64tool's field map is validated against.
-#[allow(dead_code)]
 pub const VALIDATED: &[(&str, &str)] = &[("P64 V1.1", "1.0.0.0")];
 
 #[allow(dead_code)]
@@ -112,7 +110,6 @@ pub fn write_decision(id: &DeviceIdentity, require_known: bool) -> WriteDecision
 }
 
 /// For decode-from-dump: a note if the codeplug model label is unrecognised.
-#[allow(dead_code)]
 pub fn unknown_model_note(model_label: &str) -> Option<String> {
     if VALIDATED.iter().any(|(m, _)| *m == model_label) {
         None

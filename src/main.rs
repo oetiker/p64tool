@@ -313,6 +313,10 @@ fn roundtrip(dump: PathBuf) -> Result<()> {
 
 fn decode(dump: PathBuf, out: PathBuf, country: &str, expert: bool, comments: bool) -> Result<()> {
     let cp = codeplug::Codeplug::from_dump_dir(&dump)?;
+    let label = identity::r01_model_label(cp.region("r01")?.payload());
+    if let Some(note) = identity::unknown_model_note(&label) {
+        eprintln!("NOTE: {note}");
+    }
     let cfg = config::decode(&cp, country, expert)?;
     let mut toml = config::to_toml(&cfg)?;
     if comments {
