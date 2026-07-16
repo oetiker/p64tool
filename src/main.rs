@@ -365,19 +365,28 @@ fn check(cfg_path: PathBuf, country: Option<String>) -> Result<()> {
 
 fn info(port: &str, verbose: bool) -> Result<()> {
     let s = serial::Serial::open(port)?;
-    let reply = proto::transact(&s, proto::CONNECT, proto::CONNECT_REPLY_LEN, verbose)?;
-    let _ = proto::transact(&s, proto::DISCONNECT, 22, verbose);
-    if reply.starts_with(proto::CONNECT_REPLY_PREFIX) {
-        println!("Radio responded to connect ({} bytes).", reply.len());
-        println!("Reply: {}", proto::hex(&reply));
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "no valid handshake reply ({} bytes: {})",
-            reply.len(),
-            proto::hex(&reply[..reply.len().min(24)])
-        );
+    let (mcu, r01) = proto::probe_identity(&s, verbose)?;
+    let id = identity::from_probe(mcu, &r01);
+    println!("MCU name : {}", id.mcu_name);
+    println!("Firmware : {}", id.firmware);
+    println!("Built    : {}", id.build_date);
+    println!(
+        "Model    : {}",
+        id.model_label.as_deref().unwrap_or("(unknown)")
+    );
+    match identity::gate(&id) {
+        identity::GateOutcome::Ok => println!("Gate     : OK (known P64 layout)"),
+        identity::GateOutcome::UnknownVersion {
+            model_label,
+            firmware,
+        } => {
+            println!("Gate     : WARNING — {model_label}/{firmware} not in p64tool's validated set")
+        }
+        identity::GateOutcome::WrongModel { mcu_name } => {
+            println!("Gate     : REFUSE writes — model {mcu_name:?} is not a P64")
+        }
     }
+    Ok(())
 }
 
 fn read(port: &str, out: PathBuf, verbose: bool) -> Result<()> {

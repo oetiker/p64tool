@@ -415,19 +415,12 @@ pub fn read_all(port: &Serial, verbose: bool) -> Result<Vec<RegionData>> {
 }
 
 /// Send MCU-GET within an already-open session and parse the reply.
-///
-/// Not yet wired into `main.rs` — a later task in the firmware-version-gating
-/// plan calls this from the read/write flow, hence the `dead_code` allow.
-#[allow(dead_code)]
 pub fn mcu_get(port: &Serial, verbose: bool) -> Result<RawMcuInfo> {
     let reply = transact(port, MCU_GET, MCU_GET_REPLY_LEN, verbose)?;
     parse_mcu_reply(&reply)
 }
 
 /// Read a single region by name within an already-open session (raw framed reply).
-///
-/// Not yet wired into `main.rs` — see `mcu_get` above.
-#[allow(dead_code)]
 pub fn read_region(port: &Serial, name: &str, verbose: bool) -> Result<Vec<u8>> {
     let r = REGIONS
         .iter()
@@ -437,9 +430,6 @@ pub fn read_region(port: &Serial, name: &str, verbose: bool) -> Result<Vec<u8>> 
 }
 
 /// Open a session, read the live MCU identity + region r01, then disconnect.
-///
-/// Not yet wired into `main.rs` — see `mcu_get` above.
-#[allow(dead_code)]
 pub fn probe_identity(port: &Serial, verbose: bool) -> Result<(RawMcuInfo, Vec<u8>)> {
     let reply = transact(port, CONNECT, CONNECT_REPLY_LEN, verbose)?;
     if !reply.starts_with(CONNECT_REPLY_PREFIX) {

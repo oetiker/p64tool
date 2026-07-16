@@ -5,7 +5,6 @@ use crate::codeplug::{self, get_name, Region};
 use crate::proto::RawMcuInfo;
 
 /// Combined device identity: MCU-GET (authoritative) + r01 model label (display).
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DeviceIdentity {
     pub mcu_name: String,
@@ -22,7 +21,6 @@ pub fn r01_model_label(r01_payload: &[u8]) -> String {
 }
 
 /// Build a DeviceIdentity from an MCU-GET result plus a raw (framed) r01 region.
-#[allow(dead_code)]
 pub fn from_probe(mcu: RawMcuInfo, r01_raw: &[u8]) -> DeviceIdentity {
     let region = Region {
         name: "r01".into(),
@@ -38,13 +36,11 @@ pub fn from_probe(mcu: RawMcuInfo, r01_raw: &[u8]) -> DeviceIdentity {
 }
 
 /// MCU family token the P64 must report (from the decompiled CPS model check).
-#[allow(dead_code)]
 pub const MODEL_TOKEN: &str = "DM5";
 
 /// (r01 model label, firmware) pairs p64tool's field map is validated against.
 pub const VALIDATED: &[(&str, &str)] = &[("P64 V1.1", "1.0.0.0")];
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum GateOutcome {
     Ok,
@@ -57,7 +53,6 @@ pub enum GateOutcome {
     },
 }
 
-#[allow(dead_code)]
 pub fn gate(id: &DeviceIdentity) -> GateOutcome {
     if !id.mcu_name.contains(MODEL_TOKEN) {
         return GateOutcome::WrongModel {
