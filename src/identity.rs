@@ -191,6 +191,23 @@ mod tests {
     }
 
     #[test]
+    fn gate_unknown_version_when_only_label_matches() {
+        // label "P64 V1.1" is validated, but firmware "9.9.9.9" is not.
+        assert!(matches!(
+            gate(&id("DM5abc", "9.9.9.9", Some("P64 V1.1"))),
+            GateOutcome::UnknownVersion { .. }
+        ));
+    }
+
+    #[test]
+    fn gate_unknown_version_when_model_label_none() {
+        match gate(&id("DM5abc", "1.0.0.0", None)) {
+            GateOutcome::UnknownVersion { model_label, .. } => assert!(model_label.is_empty()),
+            other => panic!("expected UnknownVersion, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn write_decision_blocks_wrong_model() {
         assert!(matches!(
             write_decision(&id("XYZ", "1.0.0.0", None), false),
