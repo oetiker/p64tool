@@ -8,6 +8,14 @@ workflow.
 
 ### New
 
+### Changed
+
+### Fixed
+
+## 0.2.0 - 2026-07-16
+
+### New
+
 - Device identity + firmware-version gating. `info` now reads the radio's live
   MCU identity (model token, firmware version, build date) via the `MCU-GET`
   command and prints a gate verdict. `write` runs a **read-only identity
@@ -16,7 +24,6 @@ workflow.
   whose firmware/revision is outside p64tool's validated set it warns and
   proceeds, or refuses with `--require-known-version`. Raw `read`/dump is never
   gated. `decode` warns when a dump's model label is not in the validated set.
-
 ### Changed
 
 - `info` now reports the device model/firmware/build date and the write-gate
