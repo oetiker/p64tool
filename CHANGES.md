@@ -8,9 +8,30 @@ workflow.
 
 ### New
 
+- Complete codeplug decode. `decode --expert` now covers every field the vendor
+  CPS binds to a control; bytes the vendor leaves reserved are preserved verbatim.
+  Newly decoded channel fields: TX-admit criteria, TX-timeout + pre-alert +
+  re-key, text-message confirm/format, private-call-confirm, timed-preamble
+  preference, emergency alarm/reply/call-indication flags, auto-scan /
+  off-network / solo-work, encryption random-key + multi-key-decrypt, direct
+  dual-slot, and the analog reset-time / whisper / tail-elimination / RX-squelch
+  fields. Scan lists gain reply-channel mode, designated-TX channel, probe and
+  hold times, and the talk-back / nuisance-delete / scan-LED flags. General
+  settings gain the master voice-encryption enable and encryption type.
+
 ### Changed
 
 ### Fixed
+
+- The crate now builds from a clean checkout. An identity test embedded a real
+  device dump via `include_bytes!("../mydump/r01.bin")` -- a git-ignored path, so
+  a fresh clone failed to compile. Replaced with a synthetic, in-code r01 fixture
+  that carries only the model label the test checks (no device-extracted data).
+- Serial handshake reliability. The radio returns no data unless a modem-control
+  line is asserted; the port is now opened with DTR and RTS raised instead of
+  relying on the driver's (kernel- and re-enumeration-dependent) default. This
+  also resolves the intermittent "connect handshake failed (got 0 bytes)" seen
+  on a freshly-powered radio.
 
 ## 0.2.0 - 2026-07-16
 
