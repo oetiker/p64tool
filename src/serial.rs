@@ -67,6 +67,20 @@ impl Serial {
             return Err(e).with_context(|| format!("tcsetattr {path}"));
         }
 
+        // Assert DTR and RTS. With both modem-control lines low the radio stays
+        // silent (returns 0 bytes to CONNECT); it only answers once a line is
+        // raised. The driver's power-on default for these lines varies by kernel
+        // and across USB re-enumeration, so we must not rely on it — raise both
+        // explicitly. Best-effort: a cable/driver that does not support the ioctl
+        // is left as-is rather than failing the open.
+        unsafe {
+            let mut status: libc::c_int = 0;
+            if libc::ioctl(fd, libc::TIOCMGET, &mut status) == 0 {
+                status |= libc::TIOCM_DTR | libc::TIOCM_RTS;
+                libc::ioctl(fd, libc::TIOCMSET, &status);
+            }
+        }
+
         let s = Serial {
             fd,
             path: path.to_string(),
