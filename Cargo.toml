@@ -1,6 +1,6 @@
 [package]
 name = "p64tool"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Linux programming tool for the Retevis MateTalk P64 / P4 DMR radio"
 license = "MIT"

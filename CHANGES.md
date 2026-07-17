@@ -8,6 +8,14 @@ workflow.
 
 ### New
 
+### Changed
+
+### Fixed
+
+## 0.2.1 - 2026-07-17
+
+### New
+
 - Complete codeplug decode. `decode --expert` now covers every field the vendor
   CPS binds to a control; bytes the vendor leaves reserved are preserved verbatim.
   Newly decoded channel fields: TX-admit criteria, TX-timeout + pre-alert +
@@ -18,7 +26,6 @@ workflow.
   fields. Scan lists gain reply-channel mode, designated-TX channel, probe and
   hold times, and the talk-back / nuisance-delete / scan-LED flags. General
   settings gain the master voice-encryption enable and encryption type.
-
 ### Changed
 
 ### Fixed
