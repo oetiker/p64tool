@@ -256,6 +256,74 @@ pub struct Channel {
     pub emergency_system: Option<u8>, // 0 = none, else 1-based alarm-system slot
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_list: Option<u8>, // 0 = none, else 1-based scan-list slot
+    // --- expert: TX admit / timeout (both modes) ---
+    /// TX admit criteria: 0=always, 1=channel-free, 2=CTCSS/CC correct (rec[34] bits 0x30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_admit: Option<u8>,
+    /// TX timeout timer, seconds (0=off) (rec[45]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tot_s: Option<u8>,
+    /// TOT pre-alert time, seconds (rec[46]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tot_prealert_s: Option<u8>,
+    /// TOT re-key/rekey time, seconds (rec[47]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tot_rekey_s: Option<u8>,
+    /// Auto-start scan on channel select (D rec[60]&1 / A rec[56]&1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_scan: Option<bool>,
+    /// Off-network / direct mode (脱网) (D rec[60]&2 / A rec[56]&2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off_network: Option<bool>,
+    // --- expert: digital-only ---
+    /// Text-message delivery confirmation (rec[35]&0x80).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sms_confirm: Option<bool>,
+    /// Text-message format 0..3 (rec[35]&0x03).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sms_format: Option<u8>,
+    /// Private-call confirmation (rec[53]&0x10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_call_confirm: Option<bool>,
+    /// Timed-preamble preference 0..3 (rec[55]&0x03).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preamble_pref: Option<u8>,
+    /// Emergency: alarm indication / alarm reply / call indication (rec[58] bits 1/2/4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emergency_alarm_ind: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emergency_alarm_reply: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emergency_call_ind: Option<bool>,
+    /// Solo / lone-worker mode (rec[60]&0x08).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solo_work: Option<bool>,
+    /// Encryption: random key / multi-key decrypt (rec[61] bits 2/4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enc_random_key: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enc_multi_key: Option<bool>,
+    /// Direct dual-slot / 直通双时隙 (rec[63]&0x08).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dual_slot: Option<bool>,
+    // --- expert: analog-only ---
+    /// Signalling reset time, seconds (rec[48]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_time_s: Option<u8>,
+    /// Whisper mode / 耳语 (rec[56]&0x10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whisper: Option<bool>,
+    /// Sub-audio tail elimination: kind 0..3 (rec[57] bits 0x06), enable (rec[57]&0x10),
+    /// and 120°/180° phase / tail-HZ (rec[57]&0x01).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_elim: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_hz: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subaudio_tail_elim: Option<u8>,
+    /// RX squelch mode (rec[63]&0x01).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx_squelch_mode: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -494,7 +562,35 @@ pub fn decode(cp: &Codeplug, country: &str, expert: bool) -> Result<RadioConfig>
             encrypt_key: None,
             emergency_system: None,
             scan_list: None,
+            tx_admit: None,
+            tot_s: None,
+            tot_prealert_s: None,
+            tot_rekey_s: None,
+            auto_scan: None,
+            off_network: None,
+            sms_confirm: None,
+            sms_format: None,
+            private_call_confirm: None,
+            preamble_pref: None,
+            emergency_alarm_ind: None,
+            emergency_alarm_reply: None,
+            emergency_call_ind: None,
+            solo_work: None,
+            enc_random_key: None,
+            enc_multi_key: None,
+            dual_slot: None,
+            reset_time_s: None,
+            whisper: None,
+            tail_elim: None,
+            tail_hz: None,
+            subaudio_tail_elim: None,
+            rx_squelch_mode: None,
         };
+        // Shared expert fields (both modes).
+        ch.tx_admit = expert.then(|| (rec[34] & 0x30) >> 4);
+        ch.tot_s = expert.then_some(rec[45]);
+        ch.tot_prealert_s = expert.then_some(rec[46]);
+        ch.tot_rekey_s = expert.then_some(rec[47]);
         if mode_b == 0 {
             ch.color_code = Some(rec[53] & 0x0F);
             // Timeslot is expert-only: on stock PMR446 simplex it must stay TS1.
@@ -504,9 +600,30 @@ pub fn decode(cp: &Codeplug, country: &str, expert: bool) -> Result<RadioConfig>
             ch.encrypt_key = Some(if rec[61] & 0x01 != 0 { rec[62] } else { 0 });
             ch.emergency_system = Some(rec[57]);
             ch.scan_list = Some(rec[59]);
+            ch.auto_scan = expert.then_some(rec[60] & 0x01 != 0);
+            ch.off_network = expert.then_some(rec[60] & 0x02 != 0);
+            ch.sms_confirm = expert.then_some(rec[35] & 0x80 != 0);
+            ch.sms_format = expert.then_some(rec[35] & 0x03);
+            ch.private_call_confirm = expert.then_some(rec[53] & 0x10 != 0);
+            ch.preamble_pref = expert.then_some(rec[55] & 0x03);
+            ch.emergency_alarm_ind = expert.then_some(rec[58] & 0x01 != 0);
+            ch.emergency_alarm_reply = expert.then_some(rec[58] & 0x02 != 0);
+            ch.emergency_call_ind = expert.then_some(rec[58] & 0x04 != 0);
+            ch.solo_work = expert.then_some(rec[60] & 0x08 != 0);
+            ch.enc_random_key = expert.then_some(rec[61] & 0x02 != 0);
+            ch.enc_multi_key = expert.then_some(rec[61] & 0x04 != 0);
+            ch.dual_slot = expert.then_some(rec[63] & 0x08 != 0);
         } else {
             ch.rx_tone = Tone::decode(rec[59], rec[60]).to_toml();
             ch.tx_tone = Tone::decode(rec[61], rec[62]).to_toml();
+            ch.auto_scan = expert.then_some(rec[56] & 0x01 != 0);
+            ch.off_network = expert.then_some(rec[56] & 0x02 != 0);
+            ch.reset_time_s = expert.then_some(rec[48]);
+            ch.whisper = expert.then_some(rec[56] & 0x10 != 0);
+            ch.tail_elim = expert.then_some(rec[57] & 0x10 != 0);
+            ch.tail_hz = expert.then_some(rec[57] & 0x01 != 0);
+            ch.subaudio_tail_elim = expert.then_some((rec[57] & 0x06) >> 1);
+            ch.rx_squelch_mode = expert.then_some(rec[63] & 0x01);
         }
         channel.push(ch);
     }
@@ -710,7 +827,20 @@ pub fn apply(cp: &mut Codeplug, cfg: &RadioConfig) -> Result<()> {
                 }
             }
         }
+        if let Some(a) = ch.tx_admit {
+            pb = (pb & !0x30) | ((a & 0x03) << 4);
+        }
         rec[34] = pb;
+        // Shared TX-timeout fields (both modes).
+        if let Some(v) = ch.tot_s {
+            rec[45] = v;
+        }
+        if let Some(v) = ch.tot_prealert_s {
+            rec[46] = v;
+        }
+        if let Some(v) = ch.tot_rekey_s {
+            rec[47] = v;
+        }
         if let Some(rx) = ch.rx_mhz {
             put_u32le(rec, 37, (rx * 1e6).round() as u32);
         }
@@ -738,6 +868,45 @@ pub fn apply(cp: &mut Codeplug, cfg: &RadioConfig) -> Result<()> {
                 if let Some(s) = ch.scan_list {
                     rec[59] = s;
                 }
+                if let Some(b) = ch.auto_scan {
+                    rec[60] = (rec[60] & !0x01) | b as u8;
+                }
+                if let Some(b) = ch.off_network {
+                    rec[60] = (rec[60] & !0x02) | ((b as u8) << 1);
+                }
+                if let Some(b) = ch.solo_work {
+                    rec[60] = (rec[60] & !0x08) | ((b as u8) << 3);
+                }
+                if let Some(b) = ch.sms_confirm {
+                    rec[35] = (rec[35] & !0x80) | ((b as u8) << 7);
+                }
+                if let Some(v) = ch.sms_format {
+                    rec[35] = (rec[35] & !0x03) | (v & 0x03);
+                }
+                if let Some(b) = ch.private_call_confirm {
+                    rec[53] = (rec[53] & !0x10) | ((b as u8) << 4);
+                }
+                if let Some(v) = ch.preamble_pref {
+                    rec[55] = (rec[55] & !0x03) | (v & 0x03);
+                }
+                if let Some(b) = ch.emergency_alarm_ind {
+                    rec[58] = (rec[58] & !0x01) | b as u8;
+                }
+                if let Some(b) = ch.emergency_alarm_reply {
+                    rec[58] = (rec[58] & !0x02) | ((b as u8) << 1);
+                }
+                if let Some(b) = ch.emergency_call_ind {
+                    rec[58] = (rec[58] & !0x04) | ((b as u8) << 2);
+                }
+                if let Some(b) = ch.enc_random_key {
+                    rec[61] = (rec[61] & !0x02) | ((b as u8) << 1);
+                }
+                if let Some(b) = ch.enc_multi_key {
+                    rec[61] = (rec[61] & !0x04) | ((b as u8) << 2);
+                }
+                if let Some(b) = ch.dual_slot {
+                    rec[63] = (rec[63] & !0x08) | ((b as u8) << 3);
+                }
             }
             Mode::Analog => {
                 let (lo, hi) = ch
@@ -756,6 +925,30 @@ pub fn apply(cp: &mut Codeplug, cfg: &RadioConfig) -> Result<()> {
                     .encode();
                 rec[61] = lo;
                 rec[62] = hi;
+                if let Some(b) = ch.auto_scan {
+                    rec[56] = (rec[56] & !0x01) | b as u8;
+                }
+                if let Some(b) = ch.off_network {
+                    rec[56] = (rec[56] & !0x02) | ((b as u8) << 1);
+                }
+                if let Some(v) = ch.reset_time_s {
+                    rec[48] = v;
+                }
+                if let Some(b) = ch.whisper {
+                    rec[56] = (rec[56] & !0x10) | ((b as u8) << 4);
+                }
+                if let Some(b) = ch.tail_elim {
+                    rec[57] = (rec[57] & !0x10) | ((b as u8) << 4);
+                }
+                if let Some(b) = ch.tail_hz {
+                    rec[57] = (rec[57] & !0x01) | b as u8;
+                }
+                if let Some(v) = ch.subaudio_tail_elim {
+                    rec[57] = (rec[57] & !0x06) | ((v & 0x03) << 1);
+                }
+                if let Some(v) = ch.rx_squelch_mode {
+                    rec[63] = (rec[63] & !0x01) | (v & 0x01);
+                }
             }
         }
     }
