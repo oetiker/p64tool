@@ -67,6 +67,25 @@ pub struct ScanList {
     pub channels: Vec<u16>,
     pub priority1: u16, // 0=selected, 0xFFFF=off, else 1-based channel
     pub priority2: u16,
+    /// Reply-channel mode 0..2 (rec[33]; 1 = use designated channel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_mode: Option<u8>,
+    /// Designated / revert TX channel, 1-based (rec[34..35]); 0xFFFF = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub designated_channel: Option<u16>,
+    /// Probe / sample time (rec[40]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_time: Option<u8>,
+    /// Signalling hold time (rec[42]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_time: Option<u8>,
+    /// Scan behaviour flags (rec[44]): talk-back, nuisance-delete, scan LED.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub talkback: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nuisance_delete: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_led: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -161,6 +180,11 @@ pub struct General {
     pub work_alone_prealarm_tone: bool,
     pub work_alone_response_s: u8,
     pub work_alone_prealarm_s: u8,
+    // --- encryption globals (region r02) ---
+    /// Master voice-encryption enable (r02[140]: 'C'=on, 'B'=off).
+    pub voice_encrypt_enable: bool,
+    /// Encryption type / mode, 0..1 (r02[141]).
+    pub encrypt_type: u8,
     // --- buttons (region r02) ---
     /// long-press time seconds (0.5..5.0 step 0.5)
     pub key_long_press_s: f64,
@@ -501,6 +525,8 @@ fn decode_general(cp: &Codeplug, expert: bool) -> Result<General> {
         work_alone_prealarm_tone: bit(r05, 784, 0x04),
         work_alone_response_s: g(r05, 785),
         work_alone_prealarm_s: g(r05, 786),
+        voice_encrypt_enable: g(r02, 140) == 67,
+        encrypt_type: g(r02, 141) & 0x01,
         key_long_press_s: 0.5 + g(r02, 104) as f64 * 0.5,
         key_top_short: g(r02, 106),
         key_top_long: g(r02, 107),
@@ -628,7 +654,8 @@ pub fn decode(cp: &Codeplug, country: &str, expert: bool) -> Result<RadioConfig>
         channel.push(ch);
     }
 
-    let (contact, rx_group, zone, scan, message, alarm, one_touch, enc_key) = decode_tables(cp)?;
+    let (contact, rx_group, zone, scan, message, alarm, one_touch, enc_key) =
+        decode_tables(cp, expert)?;
 
     Ok(RadioConfig {
         radio: RadioInfo {
@@ -786,6 +813,11 @@ fn apply_general(cp: &mut Codeplug, gen: &General) -> Result<()> {
         gm_bit(r05, 784, 0x04, gen.work_alone_prealarm_tone);
         gm(r05, 785, gen.work_alone_response_s);
         gm(r05, 786, gen.work_alone_prealarm_s);
+    }
+    {
+        let r02 = cp.region_mut("r02")?.payload_mut();
+        gm(r02, 140, if gen.voice_encrypt_enable { 67 } else { 66 });
+        gm_bit(r02, 141, 0x01, gen.encrypt_type != 0);
     }
     Ok(())
 }
@@ -1043,6 +1075,7 @@ fn set_key_material(rec: &mut [u8], key_hex: &str) {
 #[allow(clippy::type_complexity)]
 fn decode_tables(
     cp: &Codeplug,
+    expert: bool,
 ) -> Result<(
     Vec<Contact>,
     Vec<RxGroup>,
@@ -1116,6 +1149,13 @@ fn decode_tables(
             channels: all.into_iter().filter(|&v| v != 0).collect(),
             priority1: u16le(rec, 36),
             priority2: u16le(rec, 38),
+            reply_mode: expert.then_some(rec[33]),
+            designated_channel: expert.then(|| u16le(rec, 34)),
+            probe_time: expert.then_some(rec[40]),
+            hold_time: expert.then_some(rec[42]),
+            talkback: expert.then_some(rec[44] & 0x02 != 0),
+            nuisance_delete: expert.then_some(rec[44] & 0x20 != 0),
+            scan_led: expert.then_some(rec[44] & 0x80 != 0),
         });
     }
 
@@ -1242,6 +1282,27 @@ fn apply_tables(cp: &mut Codeplug, cfg: &RadioConfig) -> Result<()> {
                 set_name(rec, 0, 16, &s.name);
                 put_u16le(rec, 36, s.priority1);
                 put_u16le(rec, 38, s.priority2);
+                if let Some(m) = s.reply_mode {
+                    rec[33] = m;
+                }
+                if let Some(c) = s.designated_channel {
+                    put_u16le(rec, 34, c);
+                }
+                if let Some(v) = s.probe_time {
+                    rec[40] = v;
+                }
+                if let Some(v) = s.hold_time {
+                    rec[42] = v;
+                }
+                if let Some(b) = s.talkback {
+                    rec[44] = (rec[44] & !0x02) | ((b as u8) << 1);
+                }
+                if let Some(b) = s.nuisance_delete {
+                    rec[44] = (rec[44] & !0x20) | ((b as u8) << 5);
+                }
+                if let Some(b) = s.scan_led {
+                    rec[44] = (rec[44] & !0x80) | ((b as u8) << 7);
+                }
                 let mut members = vec![0u16]; // slot 0 = selected-channel marker
                 members.extend_from_slice(&s.channels);
                 put_u16le(rec, 54, (i + 1) as u16);
