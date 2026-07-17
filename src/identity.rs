@@ -121,20 +121,38 @@ pub fn unknown_model_note(model_label: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    // A real P64 V1.1 r01 region frame (full framed reply).
-    const R01: &[u8] = include_bytes!("../mydump/r01.bin");
+    // A synthetic r01 region frame carrying just the "P64 V1.1" model label at
+    // the documented payload offset. Built in-code so the tests (and the crate
+    // build) depend on no device-extracted dump.
+    fn r01_fixture() -> Vec<u8> {
+        let mut payload = vec![0x00u8]; // leading byte before the label
+        for u in "P64 V1.1".encode_utf16() {
+            payload.extend_from_slice(&u.to_le_bytes()); // UTF-16LE
+        }
+        payload.extend_from_slice(&[0x00, 0x00]); // NUL-terminate the label
+        payload.resize(32, 0xFF); // pad the remainder like a real region
+        let mut raw = vec![
+            0x5F, 0x5F, 0x00, 0x00, 0x00, 0x26, 0x00, 0x23, 0x02, 0x00, 0x55, 0x11,
+        ];
+        raw.extend_from_slice(&(payload.len() as u16).to_le_bytes()); // paylen @12..14
+        raw.extend_from_slice(&payload);
+        raw.extend_from_slice(&[0xFF, 0xFF, 0x55, 0xAA]); // trailer
+        let len = (raw.len() as u16) - 6; // frame-length marker @2..4
+        raw[2..4].copy_from_slice(&len.to_le_bytes());
+        raw
+    }
 
     fn r01_payload() -> Vec<u8> {
         Region {
             name: "r01".into(),
-            raw: R01.to_vec(),
+            raw: r01_fixture(),
         }
         .payload()
         .to_vec()
     }
 
     #[test]
-    fn extracts_model_label_from_real_r01() {
+    fn extracts_model_label_from_r01() {
         assert_eq!(r01_model_label(&r01_payload()), "P64 V1.1");
     }
 
@@ -152,7 +170,7 @@ mod tests {
             firmware: "1.0.0.0".into(),
             build_date: "2025-07-25".into(),
         };
-        let id = from_probe(mcu, R01);
+        let id = from_probe(mcu, &r01_fixture());
         assert_eq!(id.mcu_name, "DM5abc");
         assert_eq!(id.firmware, "1.0.0.0");
         assert_eq!(id.model_label.as_deref(), Some("P64 V1.1"));

@@ -23,6 +23,10 @@ workflow.
 
 ### Fixed
 
+- The crate now builds from a clean checkout. An identity test embedded a real
+  device dump via `include_bytes!("../mydump/r01.bin")` -- a git-ignored path, so
+  a fresh clone failed to compile. Replaced with a synthetic, in-code r01 fixture
+  that carries only the model label the test checks (no device-extracted data).
 - Serial handshake reliability. The radio returns no data unless a modem-control
   line is asserted; the port is now opened with DTR and RTS raised instead of
   relying on the driver's (kernel- and re-enumeration-dependent) default. This
