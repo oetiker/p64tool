@@ -65,6 +65,9 @@ pub struct ScanList {
     pub name: String,
     /// 1-based channel indices (0 = "selected/current channel")
     pub channels: Vec<u16>,
+    /// The CPS "Selected" pseudo-member, stored as member id 0.
+    #[serde(default = "default_true")]
+    pub include_selected: bool,
     pub priority1: u16, // 0=selected, 0xFFFF=off, else 1-based channel
     pub priority2: u16,
     /// Reply-channel mode 0..2 (rec[33]; 1 = use designated channel).
@@ -137,8 +140,16 @@ pub struct RadioInfo {
     pub note: String,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct General {
+    /// CPS "Serial No" (region r01, 16 UTF-16LE chars). Codeplug data, not a
+    /// hardware id - it travels with a clone. Omit the key to leave it alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_no: Option<String>,
     // --- core (region r02) ---
     /// 0 = digital only, 1 = analog only, 2 = analog+digital
     pub channel_mode: u8,
@@ -436,6 +447,44 @@ impl FromStr for Tone {
 
 // ---- decode: Codeplug -> RadioConfig --------------------------------------
 
+/// Channel TX power, channel-record byte 33 bits [1:0]. Verified on a P4 V1.2:
+/// bits 0 = high, 2 = low. The CPS decompile read this the other way round; a
+/// live High->Low edit moved the byte 0x80 -> 0x82.
+fn power_from_bits(b: u8) -> Power {
+    if b & 0x03 == 2 {
+        Power::Low
+    } else {
+        Power::High
+    }
+}
+
+fn power_to_bits(p: Power) -> u8 {
+    match p {
+        Power::Low => 2,
+        Power::High => 0,
+    }
+}
+
+/// Bandwidth is the 2-bit field `&0x0C`, not a single 0x04 flag. Value 3 is
+/// unobserved, so it decodes to None and leaves the stored bits alone.
+fn bandwidth_from_bits(b: u8) -> Option<f64> {
+    match (b & 0x0C) >> 2 {
+        0 => Some(12.5),
+        1 => Some(20.0),
+        2 => Some(25.0),
+        _ => None,
+    }
+}
+
+fn bandwidth_to_bits(khz: f64) -> Option<u8> {
+    for (v, bits) in [(12.5, 0u8), (20.0, 1), (25.0, 2)] {
+        if (khz - v).abs() < 0.01 {
+            return Some(bits);
+        }
+    }
+    None
+}
+
 /// Scalar setting access: CPS index WWxx[i] -> region payload[i-15].
 fn g(pl: &[u8], ww: usize) -> u8 {
     pl[ww - 15]
@@ -445,6 +494,7 @@ fn bit(pl: &[u8], ww: usize, mask: u8) -> bool {
 }
 
 fn decode_general(cp: &Codeplug, expert: bool) -> Result<General> {
+    let r01 = cp.region("r01")?.payload();
     let r02 = cp.region("r02")?.payload();
     let r03 = cp.region("r03")?.payload();
     let r0a = cp.region("r0A")?.payload();
@@ -478,6 +528,7 @@ fn decode_general(cp: &Codeplug, expert: bool) -> Result<General> {
         send_fail: g(r0a, 42) != 0,
     };
     Ok(General {
+        serial_no: Some(get_name(r01, 209, 16)),
         channel_mode: g(r02, 92),
         squelch: g(r02, 84),
         vox_enable: vox & 0x80 != 0,
@@ -555,11 +606,7 @@ pub fn decode(cp: &Codeplug, country: &str, expert: bool) -> Result<RadioConfig>
             continue; // empty slot
         }
         let pb = rec[34];
-        let power = if pb & 0x03 == 2 {
-            Power::High
-        } else {
-            Power::Low
-        };
+        let power = power_from_bits(pb);
         let mut ch = Channel {
             index: (l + 1) as u16,
             name: get_name(rec, 1, 16),
@@ -571,13 +618,15 @@ pub fn decode(cp: &Codeplug, country: &str, expert: bool) -> Result<RadioConfig>
             rx_mhz: expert.then(|| rx as f64 / 1e6),
             tx_mhz: expert.then(|| u32le(rec, 41) as f64 / 1e6),
             power,
-            bandwidth_khz: expert.then_some({
-                if mode_b == 1 && pb & 0x04 != 0 {
-                    25.0
-                } else {
-                    12.5
-                }
-            }),
+            bandwidth_khz: expert
+                .then(|| {
+                    if mode_b == 1 {
+                        bandwidth_from_bits(pb)
+                    } else {
+                        Some(12.5)
+                    }
+                })
+                .flatten(),
             rx_only: pb & 0x40 != 0,
             rx_tone: None,
             tx_tone: None,
@@ -691,6 +740,10 @@ fn gm_bit(pl: &mut [u8], ww: usize, mask: u8, on: bool) {
 }
 
 fn apply_general(cp: &mut Codeplug, gen: &General) -> Result<()> {
+    if let Some(sn) = &gen.serial_no {
+        let r01 = cp.region_mut("r01")?.payload_mut();
+        set_name(r01, 209, 16, sn);
+    }
     {
         let r02 = cp.region_mut("r02")?.payload_mut();
         gm(r02, 92, gen.channel_mode);
@@ -702,7 +755,13 @@ fn apply_general(cp: &mut Codeplug, gen: &General) -> Result<()> {
         );
         gm(r02, 76, gen.volume_max);
         gm(r02, 77, gen.volume_min);
-        gm(r02, 24, if gen.password_enable { 2 } else { 0xF8 });
+        // The "password off" sentinel is not one constant across models (0xF8 on
+        // P64 V1.1, 0x8F on P4 V1.2), so only rewrite it when the state changes.
+        if gen.password_enable {
+            gm(r02, 24, 2);
+        } else if g(r02, 24) == 2 {
+            gm(r02, 24, 0xF8);
+        }
         gm(
             r02,
             17,
@@ -842,21 +901,20 @@ pub fn apply(cp: &mut Codeplug, cfg: &RadioConfig) -> Result<()> {
             Mode::Analog => 1,
         };
         // power bits [1:0], preserve other bits of the byte
-        let mut pb = rec[34] & !0x03;
-        pb |= match ch.power {
-            Power::Low => 0,
-            Power::High => 2,
-        };
+        let mut pb = (rec[34] & !0x03) | power_to_bits(ch.power);
         pb &= !0x40;
         if ch.rx_only {
             pb |= 0x40;
         }
         if ch.mode == Mode::Analog {
             if let Some(bw) = ch.bandwidth_khz {
-                pb &= !0x04;
-                if bw >= 20.0 {
-                    pb |= 0x04;
-                }
+                let Some(bits) = bandwidth_to_bits(bw) else {
+                    bail!(
+                        "channel {}: unsupported bandwidth {bw} kHz (expected 12.5, 20 or 25)",
+                        ch.index
+                    );
+                };
+                pb = (pb & !0x0C) | (bits << 2);
             }
         }
         if let Some(a) = ch.tx_admit {
@@ -893,7 +951,11 @@ pub fn apply(cp: &mut Codeplug, cfg: &RadioConfig) -> Result<()> {
                 put_u16le(rec, 51, ch.rx_group.unwrap_or(0));
                 let key = ch.encrypt_key.unwrap_or(0);
                 rec[61] = (rec[61] & !0x01) | if key > 0 { 1 } else { 0 };
-                rec[62] = key;
+                // key 0 means "off": clear the enable bit but keep the stored
+                // slot, which the radio retains as the last-selected key.
+                if key > 0 {
+                    rec[62] = key;
+                }
                 if let Some(e) = ch.emergency_system {
                     rec[57] = e;
                 }
@@ -1045,6 +1107,18 @@ fn is_fill(rec: &[u8], fill: u8) -> bool {
 fn clear(rec: &mut [u8], fill: u8) {
     rec.iter_mut().for_each(|b| *b = fill);
 }
+/// True if a record is blank under either erase convention. Which one a region
+/// uses varies by model, so both must be recognised.
+fn is_blank(rec: &[u8]) -> bool {
+    is_fill(rec, 0x00) || is_fill(rec, 0xFF)
+}
+/// Blank an unused record, but leave an already-blank one exactly as found so
+/// it round-trips byte-for-byte whichever fill the radio used.
+fn clear_unused(rec: &mut [u8], fill: u8) {
+    if !is_blank(rec) {
+        clear(rec, fill);
+    }
+}
 /// Encryption-key material lives in 32 bytes at record offset 36. The CPS reads
 /// it as 8 little-endian u32 words shown big-endian, so canonical byte `j`
 /// (0..31) maps to stored byte `36 + (j/4)*4 + 3 - (j%4)`. Returns the full
@@ -1141,11 +1215,12 @@ fn decode_tables(
             continue;
         }
         let n = u16le(rec, 56) as usize;
-        // members start at +58; slot 0 is the "selected channel" (0) marker.
+        // members start at +58; a member id of 0 is the "Selected" pseudo-channel.
         let all = get_members(rec, 58, n.min(16));
         scan.push(ScanList {
             index: (i + 1) as u16,
             name: get_name(rec, 0, 16),
+            include_selected: all.contains(&0),
             channels: all.into_iter().filter(|&v| v != 0).collect(),
             priority1: u16le(rec, 36),
             priority2: u16le(rec, 38),
@@ -1162,7 +1237,7 @@ fn decode_tables(
     let mut message = Vec::new();
     for i in 0..T_MSG.count {
         let rec = T_MSG.record(cp, i)?;
-        if is_fill(rec, 0x00) {
+        if is_blank(rec) {
             continue;
         }
         let len = u16le(rec, 2) as usize;
@@ -1247,7 +1322,7 @@ fn apply_tables(cp: &mut Codeplug, cfg: &RadioConfig) -> Result<()> {
                 };
                 put_u16le(rec, 38, (i + 1) as u16);
             }
-            None => clear(rec, 0xFF),
+            None => clear_unused(rec, 0xFF),
         }
     }
     for i in 0..T_RXGROUP.count {
@@ -1259,7 +1334,7 @@ fn apply_tables(cp: &mut Codeplug, cfg: &RadioConfig) -> Result<()> {
                 rec[64] = g.contacts.len() as u8;
                 rec[65] = (i + 1) as u8;
             }
-            None => clear(rec, 0xFF),
+            None => clear_unused(rec, 0xFF),
         }
     }
     for i in 0..T_ZONE.count {
@@ -1272,7 +1347,7 @@ fn apply_tables(cp: &mut Codeplug, cfg: &RadioConfig) -> Result<()> {
                 put_u16le(rec, 34, z.channels.len() as u16);
                 set_members(rec, 36, &z.channels, 16);
             }
-            None => clear(rec, 0xFF),
+            None => clear_unused(rec, 0xFF),
         }
     }
     for i in 0..T_SCAN.count {
@@ -1303,13 +1378,16 @@ fn apply_tables(cp: &mut Codeplug, cfg: &RadioConfig) -> Result<()> {
                 if let Some(b) = s.scan_led {
                     rec[44] = (rec[44] & !0x80) | ((b as u8) << 7);
                 }
-                let mut members = vec![0u16]; // slot 0 = selected-channel marker
+                let mut members = Vec::with_capacity(s.channels.len() + 1);
+                if s.include_selected {
+                    members.push(0u16);
+                }
                 members.extend_from_slice(&s.channels);
                 put_u16le(rec, 54, (i + 1) as u16);
                 put_u16le(rec, 56, members.len() as u16);
                 set_members(rec, 58, &members, 16);
             }
-            None => clear(rec, 0xFF),
+            None => clear_unused(rec, 0xFF),
         }
     }
     for i in 0..T_MSG.count {
@@ -1324,7 +1402,7 @@ fn apply_tables(cp: &mut Codeplug, cfg: &RadioConfig) -> Result<()> {
                     put_u16le(rec, 4 + k * 2, v);
                 }
             }
-            None => clear(rec, 0x00),
+            None => clear_unused(rec, 0x00),
         }
     }
     for i in 0..T_ALARM.count {
@@ -1340,7 +1418,7 @@ fn apply_tables(cp: &mut Codeplug, cfg: &RadioConfig) -> Result<()> {
                 rec[39] = a.rx_dwell_s;
                 rec[45] = (i + 1) as u8;
             }
-            None => clear(rec, 0xFF),
+            None => clear_unused(rec, 0xFF),
         }
     }
     for i in 0..T_ONETOUCH.count {
@@ -1385,7 +1463,7 @@ fn apply_tables(cp: &mut Codeplug, cfg: &RadioConfig) -> Result<()> {
                 set_name(rec, 4, 16, &k.name);
                 set_key_material(rec, &key_hex);
             }
-            None => clear(rec, 0xFF),
+            None => clear_unused(rec, 0xFF),
         }
     }
     Ok(())
@@ -1418,6 +1496,7 @@ fn comment_for(key: &str) -> Option<&'static str> {
         "scan_carrier_operated" => "false=time-operated scan, true=carrier-operated",
         "power_save_mode" => "0=off, 1=1:1, 2=1:2, 3=1:4",
         "power_save_delay_s" => "seconds before power-save kicks in",
+        "serial_no" => "CPS \"Serial No\", <=16 chars; codeplug data, not a hardware id",
         "radio_dmr_id" => "this radio's DMR ID (1..16776415)",
         "preamble" => "DMR preamble/head-frame count 1..10",
         "group_call_hang_ms" => "0..7000 ms, step 500",
@@ -1439,7 +1518,7 @@ fn comment_for(key: &str) -> Option<&'static str> {
         "mode" => "digital | analog",
         "rx_mhz" | "tx_mhz" => "frequency in MHz (expert; PMR446 grid is fixed)",
         "power" => "high = 0.5 W (spec max, legal PMR446); low = reduced power",
-        "bandwidth_khz" => "12.5 or 25 (analog); digital is always 12.5",
+        "bandwidth_khz" => "12.5, 20 or 25 (analog); digital is always 12.5",
         "rx_only" => "listen-only, no transmit",
         "color_code" => "DMR color code 0..15 (must match the other radios)",
         "time_slot" => "DMR timeslot 1 or 2",
@@ -1455,6 +1534,7 @@ fn comment_for(key: &str) -> Option<&'static str> {
         "key_type" => "arc4 | aes128 | aes256",
         "key" => "hex key; openssl rand -hex 16 (AES128) / 32 (AES256)",
         "channels" => "1-based channel numbers (0 = current/selected)",
+        "include_selected" => "also scan the currently selected channel (CPS \"Selected\")",
         "contacts" => "1-based contact numbers",
         "revert_channel" => "0=current channel, else channel number to alarm on",
         "alarm_type" => "0=none, 1=siren, 2=normal, 3=silent, 4=silent+voice",
@@ -1534,5 +1614,153 @@ mod tests {
         // truncation to max chars
         set_name(&mut b, 0, 4, "ABCDEFG");
         assert_eq!(get_name(&b, 0, 4), "ABCD");
+    }
+
+    /// Ground truth from a live P4 V1.2: an OEM codeplug ships every channel at
+    /// 0x80 and the CPS shows High; setting one channel to Low moved it to 0x82.
+    #[test]
+    fn power_bits_match_hardware() {
+        assert_eq!(power_from_bits(0x80), Power::High);
+        assert_eq!(power_from_bits(0x82), Power::Low);
+        for p in [Power::Low, Power::High] {
+            assert_eq!(power_from_bits(0x80 | power_to_bits(p)), p);
+        }
+    }
+
+    /// Ground truth from a live P4 V1.2: the OEM CPS writes 0x88 for a 25 kHz
+    /// analog channel and 0x80 for 12.5 kHz, so the field is the 2-bit &0x0C
+    /// and not a single 0x04 flag. Reading it as 0x04 reported those 25 kHz
+    /// channels as 12.5 kHz and made a narrowing write silently do nothing.
+    #[test]
+    fn bandwidth_bits_match_hardware() {
+        assert_eq!(bandwidth_from_bits(0x80), Some(12.5));
+        assert_eq!(bandwidth_from_bits(0x88), Some(25.0));
+        assert_eq!(bandwidth_from_bits(0x84), Some(20.0));
+        assert_eq!(bandwidth_from_bits(0x8C), None);
+        for v in [12.5, 20.0, 25.0] {
+            let bits = bandwidth_to_bits(v).unwrap();
+            assert_eq!(bandwidth_from_bits(0x80 | (bits << 2)), Some(v));
+        }
+        assert_eq!(bandwidth_to_bits(15.0), None);
+    }
+
+    /// Build a minimal in-memory codeplug whose regions are all zero-payload
+    /// except `r08`, which gets `n` channel records of `CHANNEL_STRIDE` bytes.
+    /// Frame shape must satisfy `codeplug::validate_frame`.
+    fn frame(payload: Vec<u8>) -> Vec<u8> {
+        let mut raw = vec![
+            0x5f, 0x5f, 0, 0, 0x00, 0x26, 0x00, 0x23, 0x02, 0x00, 0x55, 0x11,
+        ];
+        raw.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+        raw.extend_from_slice(&payload);
+        raw.extend_from_slice(&[0xff, 0xff, 0x55, 0xaa]);
+        raw
+    }
+    fn one_channel_r08() -> Vec<u8> {
+        let mut rec = vec![0xffu8; CHANNEL_STRIDE];
+        set_name(&mut rec, 1, 16, "TEST");
+        rec[33] = 1; // analog
+        rec[34] = 0x80; // High power, no rx_only, no tx_admit bits
+        rec[37..41].copy_from_slice(&446_000_000u32.to_le_bytes()); // RX
+        rec[41..45].copy_from_slice(&446_000_000u32.to_le_bytes()); // TX
+        rec
+    }
+
+    /// decode and apply must agree on *which byte* carries channel power.
+    ///
+    /// `power_bits_match_hardware` pins the bit values but exercises the two
+    /// helpers in isolation, so a future edit could move `decode` to a
+    /// different record byte than `apply` writes and still pass. This drives a
+    /// real record through `decode` -> flip -> `apply` and asserts that exactly
+    /// one byte moved, and that it was the byte `decode` had read.
+    #[test]
+    fn decode_and_apply_agree_on_the_power_byte() {
+        const POWER_BYTE: usize = 34;
+
+        let mut regions = Vec::new();
+        for name in crate::codeplug::REGION_ORDER {
+            let payload = if *name == "r08" {
+                // Full channel table: decode walks all CHANNEL_COUNT slots.
+                let mut p = vec![0xffu8; CHANNEL_COUNT * CHANNEL_STRIDE];
+                p[..CHANNEL_STRIDE].copy_from_slice(&one_channel_r08());
+                p
+            } else {
+                // Oversized on purpose: several regions are indexed well past
+                // their nominal length by the list tables (r04 reaches ~8016 +
+                // 32*72). Capped below 0xFFFF because the frame header stores
+                // the payload length as a u16 - 64 KiB would wrap to 0.
+                vec![0u8; 0xF000]
+            };
+            regions.push(crate::codeplug::Region {
+                name: name.to_string(),
+                raw: frame(payload),
+            });
+        }
+        let mut cp = Codeplug { regions };
+
+        let before = cp.region("r08").unwrap().payload().to_vec();
+        assert_eq!(
+            before[POWER_BYTE], 0x80,
+            "fixture should start at the OEM High value"
+        );
+
+        // decode must read High out of byte 34.
+        let mut cfg = decode(&cp, "CH", true).unwrap();
+        assert_eq!(cfg.channel.len(), 1, "fixture should decode one channel");
+        assert_eq!(
+            cfg.channel[0].power,
+            Power::High,
+            "decode read power from the wrong byte"
+        );
+
+        // Flip only power, apply, and diff the whole region.
+        cfg.channel[0].power = Power::Low;
+        apply(&mut cp, &cfg).unwrap();
+        let after = cp.region("r08").unwrap().payload();
+
+        let diffs: Vec<usize> = (0..before.len().min(after.len()))
+            .filter(|&i| before[i] != after[i])
+            .collect();
+        assert_eq!(
+            diffs,
+            vec![POWER_BYTE],
+            "flipping power must move exactly the byte decode reads; \
+             decode/apply have drifted apart"
+        );
+        assert_eq!(after[POWER_BYTE], 0x82, "Low must encode as 0x82");
+
+        // And back again, to prove the mapping is symmetric on a real record.
+        cfg.channel[0].power = Power::High;
+        apply(&mut cp, &cfg).unwrap();
+        assert_eq!(
+            cp.region("r08").unwrap().payload(),
+            &before[..],
+            "High -> Low -> High must restore the original record"
+        );
+    }
+
+    #[test]
+    fn empty_name_stays_ff_filled() {
+        // A programmed-but-unnamed record is all-0xFF on the radio; writing a
+        // 0x0000 terminator there breaks a byte-faithful roundtrip.
+        let mut b = [0xFFu8; 32];
+        set_name(&mut b, 0, 16, "");
+        assert!(b.iter().all(|&x| x == 0xFF));
+    }
+
+    #[test]
+    fn blank_records_keep_their_existing_fill() {
+        let mut ff = [0xFFu8; 16];
+        clear_unused(&mut ff, 0x00);
+        assert!(ff.iter().all(|&b| b == 0xFF));
+
+        let mut zero = [0x00u8; 16];
+        clear_unused(&mut zero, 0xFF);
+        assert!(zero.iter().all(|&b| b == 0x00));
+
+        // A record with real content is still blanked with the given fill.
+        let mut used = [0x12u8; 16];
+        clear_unused(&mut used, 0xFF);
+        assert!(used.iter().all(|&b| b == 0xFF));
     }
 }

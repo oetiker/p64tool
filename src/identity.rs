@@ -15,6 +15,10 @@ pub struct DeviceIdentity {
 
 /// The codeplug model label, e.g. "P64 V1.1". UTF-16LE at r01 payload offset 1
 /// (CPS WW01 offset 16; payload = WW - codeplug::WW_TO_PAYLOAD), up to 16 chars.
+///
+/// The `V1.x` is the programming-software version, not a hardware revision, and
+/// the CPS shows a second copy from offset 145 that it rewrites on every save.
+/// Offset 1 is used here because it survives a CPS save unchanged.
 pub fn r01_model_label(r01_payload: &[u8]) -> String {
     let off = 16 - codeplug::WW_TO_PAYLOAD; // = 1
 
@@ -43,7 +47,14 @@ pub fn from_probe(mcu: RawMcuInfo, r01_raw: &[u8]) -> DeviceIdentity {
 pub const MODEL_TOKEN: &str = "DM5";
 
 /// (r01 model label, firmware) pairs p64tool's field map is validated against.
-pub const VALIDATED: &[(&str, &str)] = &[("P64 V1.1", "1.0.0.0")];
+///
+/// `P4 V1.2` / `1.0.0.0` added from a Chicago Offline read-side validation on a
+/// MateTalk P4 (`DM5`, built 2025-06-23): four consecutive `read` runs were
+/// byte-identical to each other, all 13 regions reported `header_ok`, and every
+/// region was byte-identical to an OEM CPS v1.5 readback capture of the same
+/// radio. Read path only -- the write path has not been exercised on this
+/// model/firmware.
+pub const VALIDATED: &[(&str, &str)] = &[("P64 V1.1", "1.0.0.0"), ("P4 V1.2", "1.0.0.0")];
 
 #[derive(Debug)]
 pub enum GateOutcome {
@@ -256,5 +267,37 @@ mod tests {
     fn unknown_model_note_is_none_for_validated() {
         assert!(unknown_model_note("P64 V1.1").is_none());
         assert!(unknown_model_note("P64 V9.9").is_some());
+    }
+
+    #[test]
+    fn gate_ok_for_validated_p4() {
+        assert!(matches!(
+            gate(&id("DM5", "1.0.0.0", Some("P4 V1.2"))),
+            GateOutcome::Ok
+        ));
+    }
+
+    #[test]
+    fn p4_v1_2_does_not_widen_the_gate() {
+        // Adding the P4 entry must not admit other P4 revisions or firmwares.
+        assert!(matches!(
+            gate(&id("DM5", "1.0.0.0", Some("P4 V1.4"))),
+            GateOutcome::UnknownVersion { .. }
+        ));
+        assert!(matches!(
+            gate(&id("DM5", "1.1.0.0", Some("P4 V1.2"))),
+            GateOutcome::UnknownVersion { .. }
+        ));
+        // A non-P64/P4 MCU is still blocked on the model token, not the label.
+        assert!(matches!(
+            gate(&id("XYZ", "1.0.0.0", Some("P4 V1.2"))),
+            GateOutcome::WrongModel { .. }
+        ));
+    }
+
+    #[test]
+    fn unknown_model_note_is_none_for_p4_v1_2() {
+        assert!(unknown_model_note("P4 V1.2").is_none());
+        assert!(unknown_model_note("P4 V1.4").is_some());
     }
 }

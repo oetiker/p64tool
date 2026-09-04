@@ -19,14 +19,17 @@ pub struct Finding {
 
 pub struct Profile {
     pub name: &'static str,
-    /// inclusive band [lo, hi] in MHz that every RX and TX must fall in
+    /// inclusive frequency bands [lo, hi] in MHz for every RX and TX
     pub band_mhz: (f64, f64),
+    pub bands_mhz: &'static [(f64, f64)],
     /// require TX == RX (no repeater / duplex)
     pub simplex_only: bool,
     /// max legal channel bandwidth in kHz (wider => error)
     pub max_bandwidth_khz: f64,
     /// if true, "High" power is flagged (only relevant if High could exceed 0.5 W ERP)
     pub power_limited: bool,
+    /// whether digital/DMR channels are permitted by this profile
+    pub allow_dmr: bool,
 }
 
 /// PMR446 (CEPT-harmonised; applies to CH and most of Europe).
@@ -36,15 +39,31 @@ pub struct Profile {
 pub const PMR446: Profile = Profile {
     name: "PMR446 (CH/CEPT)",
     band_mhz: (446.00625, 446.19375),
+    bands_mhz: &[(446.00625, 446.19375)],
     simplex_only: true,
     max_bandwidth_khz: 12.5,
     power_limited: false,
+    allow_dmr: true,
+};
+
+/// US GMRS handheld bands used by the family channels. This policy describes
+/// frequency, duplex, and bandwidth limits; licensing and channel-specific
+/// operating requirements remain operator responsibilities.
+pub const US_GMRS: Profile = Profile {
+    name: "US GMRS",
+    band_mhz: (462.550, 467.725),
+    bands_mhz: &[(462.550, 462.725), (467.550, 467.725)],
+    simplex_only: false,
+    max_bandwidth_khz: 20.0,
+    power_limited: false,
+    allow_dmr: false,
 };
 
 pub fn profile_for(country: &str) -> Option<&'static Profile> {
     match country.to_ascii_uppercase().as_str() {
         // CEPT PMR446 members share the same rule; extend as needed.
         "CH" | "EU" | "CEPT" | "DE" | "AT" | "FR" | "IT" | "LI" => Some(&PMR446),
+        "GMRS" | "US-GMRS" | "US_GMRS" => Some(&US_GMRS),
         "" => None,
         _ => None,
     }
@@ -55,9 +74,17 @@ const EPS: f64 = 0.0005; // 0.5 kHz tolerance for float compares
 pub fn check(cfg: &RadioConfig, profile: &Profile) -> Vec<Finding> {
     let mut out = Vec::new();
     let (lo, hi) = profile.band_mhz;
-    let in_band = |f: f64| f >= lo - EPS && f <= hi + EPS;
+    let in_band = |f: f64| {
+        profile
+            .bands_mhz
+            .iter()
+            .any(|(band_lo, band_hi)| f >= band_lo - EPS && f <= band_hi + EPS)
+    };
 
     for ch in &cfg.channel {
+        if ch.name.is_empty() {
+            continue;
+        }
         let c = Some(ch.index);
         let err = |m: String| Finding {
             severity: Severity::Error,
@@ -69,6 +96,12 @@ pub fn check(cfg: &RadioConfig, profile: &Profile) -> Vec<Finding> {
             channel: c,
             message: m,
         };
+
+        if !profile.allow_dmr && ch.mode == Mode::Digital {
+            out.push(err("DMR is not permitted by the US GMRS profile; use an "
+                .to_string()
+                + "explicit experimental override only for controlled testing"));
+        }
 
         // Frequencies are only checkable when present (expert mode). When hidden
         // they are preserved unchanged from the radio, so there is nothing new
@@ -134,4 +167,23 @@ pub fn print_findings(findings: &[Finding]) -> (usize, usize) {
         }
     }
     (errors, warnings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_lookup_supports_gmrs_names() {
+        assert_eq!(profile_for("GMRS").map(|p| p.name), Some("US GMRS"));
+        assert_eq!(profile_for("US-GMRS").map(|p| p.name), Some("US GMRS"));
+        assert_eq!(profile_for("US_GMRS").map(|p| p.name), Some("US GMRS"));
+    }
+
+    #[test]
+    fn gmrs_profile_uses_discontiguous_handheld_bands() {
+        assert_eq!(US_GMRS.bands_mhz, &[(462.550, 462.725), (467.550, 467.725)]);
+        assert!(!US_GMRS.simplex_only);
+        assert_eq!(US_GMRS.max_bandwidth_khz, 20.0);
+    }
 }

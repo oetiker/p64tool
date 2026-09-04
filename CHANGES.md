@@ -8,9 +8,64 @@ workflow.
 
 ### New
 
-### Changed
+- `[general] serial_no` exposes the CPS-editable "Serial No" (region `r01`,
+  16 UTF-16LE chars). It is codeplug data, not a hardware id — it travels with a
+  clone. Omit the key from a config to leave the stored value untouched.
+- `[[scan]] include_selected` surfaces the CPS "Selected" pseudo-member (stored
+  as member id `0`). Previously `decode` silently dropped it and `apply`
+  unconditionally re-added it, so a scan list without "Selected" could not be
+  represented and would have been corrupted on write.
+- `read --allow-incomplete` keeps a partial dump for analysis. Without it, a
+  short or malformed region is now an error and no dump is written.
 
 ### Fixed
+
+- **Channel `bandwidth_khz` was a 1-bit read of a 2-bit field.** Bandwidth is
+  channel-record byte 33 `&0x0C` with `0 = 12.5, 1 = 20, 2 = 25` kHz; the code
+  tested only `&0x04`. Three consequences, all confirmed against a live P4 V1.2
+  whose CPS-written 25 kHz channels store `0x88`: every 25 kHz channel decoded
+  as 12.5 kHz; 20 kHz was not representable at all; and because `apply` only
+  ever touched `0x04`, narrowing such a channel to 12.5 kHz wrote nothing and
+  left the radio wideband while the config claimed otherwise. `roundtrip` could
+  not catch this — it stayed byte-faithful precisely because `0x08` was never
+  written. An unknown value 3 now decodes to `None` and leaves the bits alone,
+  and an unsupported bandwidth is a hard error rather than a silent no-op.
+
+- **Channel `power` was inverted.** Channel-record byte 33 bits `[1:0]` are
+  `0 = high, 2 = low`, not the reverse taken from the CPS decompile. Confirmed on
+  a live P4 V1.2: an OEM codeplug ships every channel at `0x80` and the CPS shows
+  High; setting one channel to Low moved that byte to `0x82`. Anything decoded
+  before this fix reported every channel's power backwards, and writing such a
+  config back would have flipped it on the radio.
+
+### Changed
+
+- The write path is **hardware-proven**, identity and modifying, on a P4 V1.2.
+  An identity write of all 11 regions re-read byte-identical to the backup; a
+  one-field TOML edit changed exactly 19 bytes in one channel's name and nothing
+  else, across any region. Changed content has been exercised on `r08` only, and
+  on one model and firmware.
+- `write` never writes `r32` or `rFF`, matching the vendor CPS. Both are
+  byte-identical across every radio measured, so writing them could only ever be
+  a no-op or a mistake. They are still read and preserved.
+- `connect` retries up to 5 times. The first handshake after an idle port
+  returns 0 bytes on real hardware; `info`, `read` and `write` previously had to
+  be run twice by hand.
+- `PROTOCOL.md` documents MCU-GET (`0x32`), the `0x44`→`0x54` write ACK, the
+  region write frame, and corrects the DTR/RTS requirement — the old text said
+  both lines are left de-asserted, which is backwards and leaves the radio silent.
+
+### Fixed
+
+- `decode`→`apply` is byte-faithful on P4 codeplugs. Four asymmetries broke it:
+  an empty name wrote a `0x0000` terminator into an `0xFF`-filled field; blank
+  records were force-filled with one convention when it varies by radio; the
+  channel encryption key slot was zeroed whenever the enable bit was clear; and
+  the `r02[24]` password sentinel was rewritten to a value only factory radios
+  use. `roundtrip` now passes on six dumps spanning four radios.
+- A truncated dump can no longer be produced or loaded. `Codeplug::from_dump_dir`
+  validated only the first 18 bytes, so a short region reached
+  `raw[14..14+paylen]` and panicked; it now reports the actual sizes.
 
 ## 0.2.1 - 2026-07-17
 

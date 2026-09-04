@@ -41,6 +41,31 @@ pub struct Codeplug {
     pub regions: Vec<Region>,
 }
 
+/// Reject a region frame that is truncated or malformed. A short serial read
+/// yields a file whose header still claims the full payload, so length has to be
+/// checked against the header and the trailer must be present.
+pub fn validate_frame(raw: &[u8]) -> Result<()> {
+    if raw.len() < 18 {
+        bail!("only {} bytes; too short to be a region frame", raw.len());
+    }
+    if &raw[0..2] != b"\x5f\x5f" {
+        bail!("missing 5F 5F magic");
+    }
+    let paylen = u16::from_le_bytes([raw[12], raw[13]]) as usize;
+    let want = 14 + paylen + 4;
+    if raw.len() != want {
+        bail!(
+            "truncated: header declares a {paylen}-byte payload ({want}-byte frame) \
+             but the file is {} bytes. Re-read the radio.",
+            raw.len()
+        );
+    }
+    if &raw[want - 4..] != b"\xff\xff\x55\xaa" {
+        bail!("missing FF FF 55 AA trailer");
+    }
+    Ok(())
+}
+
 impl Codeplug {
     /// Load from a directory of `<region>.bin` files produced by `p64tool read`.
     pub fn from_dump_dir(dir: &Path) -> Result<Codeplug> {
@@ -48,9 +73,8 @@ impl Codeplug {
         for name in REGION_ORDER {
             let p = dir.join(format!("{name}.bin"));
             let raw = std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?;
-            if raw.len() < 18 || &raw[0..2] != b"\x5f\x5f" {
-                bail!("{} is not a valid region frame", p.display());
-            }
+            validate_frame(&raw)
+                .with_context(|| format!("{} is not a usable region dump", p.display()))?;
             regions.push(Region {
                 name: name.to_string(),
                 raw,
@@ -181,16 +205,61 @@ pub fn set_members(rec: &mut [u8], off: usize, members: &[u16], max: usize) {
 
 /// Write a UTF-16LE name using the radio's convention: the characters, then a
 /// single 0x0000 terminator (if it fits), then 0xFFFF padding for the rest.
+/// An empty name is all-0xFFFF with no terminator, matching how the radio
+/// stores a programmed-but-unnamed record.
 pub fn set_name(b: &mut [u8], off: usize, max_chars: usize, name: &str) {
     let chars: Vec<u16> = name.encode_utf16().take(max_chars).collect();
     for k in 0..max_chars {
         let v = if k < chars.len() {
             chars[k]
-        } else if k == chars.len() {
+        } else if k == chars.len() && !chars.is_empty() {
             0x0000
         } else {
             0xFFFF
         };
         b[off + 2 * k..off + 2 * k + 2].copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    fn frame(payload_len: usize, truncate_to: Option<usize>) -> Vec<u8> {
+        let mut raw = vec![
+            0x5F, 0x5F, 0x00, 0x00, 0x00, 0x26, 0x00, 0x23, 0x02, 0x00, 0x55, 0x11,
+        ];
+        raw.extend_from_slice(&(payload_len as u16).to_le_bytes());
+        raw.extend(std::iter::repeat_n(0xAB, payload_len));
+        raw.extend_from_slice(&[0xFF, 0xFF, 0x55, 0xAA]);
+        if let Some(n) = truncate_to {
+            raw.truncate(n);
+        }
+        raw
+    }
+
+    #[test]
+    fn accepts_a_well_formed_frame() {
+        assert!(validate_frame(&frame(64, None)).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_truncated_frame() {
+        // The exact failure seen on hardware: r08's header still declared the
+        // full payload but the read stopped at 5869 bytes.
+        let err = validate_frame(&frame(18437, Some(5869))).unwrap_err();
+        assert!(err.to_string().contains("truncated"), "{err}");
+    }
+
+    #[test]
+    fn rejects_missing_magic_or_trailer() {
+        let mut no_magic = frame(32, None);
+        no_magic[0] = 0x00;
+        assert!(validate_frame(&no_magic).is_err());
+
+        let mut no_trailer = frame(32, None);
+        let n = no_trailer.len();
+        no_trailer[n - 1] = 0x00;
+        assert!(validate_frame(&no_trailer).is_err());
     }
 }
