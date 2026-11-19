@@ -314,18 +314,47 @@ pub struct RegionData {
     pub prefix_ok: bool,
 }
 
+/// CONNECT is read-only and safe to repeat after a missed or malformed reply.
+/// Never retry codeplug writes automatically.
+fn connect(port: &Serial, verbose: bool) -> Result<Vec<u8>> {
+    let mut last = Vec::new();
+    for attempt in 1..=10 {
+        port.flush_input()?;
+        if verbose {
+            eprintln!("  -> {}", hex(CONNECT));
+        }
+        port.write_all(CONNECT)?;
+        last = port.read_response(
+            CONNECT_REPLY_LEN,
+            Duration::from_millis(250),
+            Duration::from_millis(700),
+        )?;
+        if last.len() == CONNECT_REPLY_LEN && last.starts_with(CONNECT_REPLY_PREFIX) {
+            if verbose || attempt > 1 {
+                eprintln!("Connected on attempt {attempt}/10.");
+            }
+            return Ok(last);
+        }
+        if verbose {
+            eprintln!(
+                "CONNECT attempt {attempt}/10: {} bytes, no valid reply",
+                last.len()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    bail!(
+        "connect handshake failed after 10 attempts (last reply: {} bytes)",
+        last.len()
+    )
+}
+
 /// Open a session and write the given pre-built region frames, in order.
 /// `frames` = (label, id, full_write_frame). Verifies the 19-byte ACK after
 /// each region. Always attempts to disconnect at the end.
 pub fn write_all(port: &Serial, frames: &[(String, Vec<u8>)], verbose: bool) -> Result<()> {
     eprintln!("Connecting...");
-    let reply = transact(port, CONNECT, CONNECT_REPLY_LEN, verbose)?;
-    if !reply.starts_with(CONNECT_REPLY_PREFIX) {
-        bail!(
-            "connect handshake failed (got {} bytes). Radio on? Right --port?",
-            reply.len()
-        );
-    }
+    connect(port, verbose)?;
     eprintln!("Connected. Writing {} regions...", frames.len());
 
     let result = (|| -> Result<()> {
@@ -365,15 +394,7 @@ pub fn write_all(port: &Serial, frames: &[(String, Vec<u8>)], verbose: bool) -> 
 /// Open a session and read every region. Always disconnects at the end.
 pub fn read_all(port: &Serial, verbose: bool) -> Result<Vec<RegionData>> {
     eprintln!("Connecting...");
-    let reply = transact(port, CONNECT, CONNECT_REPLY_LEN, verbose)?;
-    if !reply.starts_with(CONNECT_REPLY_PREFIX) {
-        bail!(
-            "connect handshake failed (got {} bytes, head: {}). \
-             Is the radio on, cable seated, and the right --port selected?",
-            reply.len(),
-            hex(&reply[..reply.len().min(16)])
-        );
-    }
+    connect(port, verbose)?;
     eprintln!("Connected. Reading {} regions...", REGIONS.len());
 
     let mut out = Vec::new();
@@ -387,15 +408,15 @@ pub fn read_all(port: &Serial, verbose: bool) -> Result<Vec<RegionData>> {
             );
             let reply = transact(port, &r.command(), r.expected, verbose)?;
             let prefix_ok = reply.starts_with(r.reply_prefix);
-            eprintln!(
-                "{} bytes{}",
-                reply.len(),
-                if prefix_ok {
-                    ""
-                } else {
-                    "  [!! unexpected header]"
-                }
-            );
+            if reply.len() != r.expected || !prefix_ok {
+                bail!(
+                    "{}: invalid read reply ({} bytes, expected {})",
+                    r.name,
+                    reply.len(),
+                    r.expected
+                );
+            }
+            eprintln!("{} bytes", reply.len());
             out.push(RegionData {
                 name: r.name.to_string(),
                 selector: r.sel,
@@ -431,13 +452,7 @@ pub fn read_region(port: &Serial, name: &str, verbose: bool) -> Result<Vec<u8>> 
 
 /// Open a session, read the live MCU identity + region r01, then disconnect.
 pub fn probe_identity(port: &Serial, verbose: bool) -> Result<(RawMcuInfo, Vec<u8>)> {
-    let reply = transact(port, CONNECT, CONNECT_REPLY_LEN, verbose)?;
-    if !reply.starts_with(CONNECT_REPLY_PREFIX) {
-        bail!(
-            "connect handshake failed (got {} bytes). Radio on? Right --port?",
-            reply.len()
-        );
-    }
+    connect(port, verbose)?;
     let result = (|| -> Result<(RawMcuInfo, Vec<u8>)> {
         let mcu = mcu_get(port, verbose)?;
         let r01 = read_region(port, "r01", verbose)?;
@@ -485,5 +500,59 @@ mod mcu_tests {
         let mut bad = sample_reply();
         bad[0] = 0x00; // break prefix
         assert!(parse_mcu_reply(&bad).is_err());
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    use std::ffi::CStr;
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+
+    #[test]
+    fn retries_missed_connect_and_reassembles_noisy_reply() {
+        let mut master = -1;
+        let mut slave = -1;
+        let mut name = [0 as libc::c_char; 128];
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    name.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut master = unsafe { File::from_raw_fd(master) };
+        let slave = unsafe { File::from_raw_fd(slave) };
+        let path = unsafe { CStr::from_ptr(name.as_ptr()) }.to_str().unwrap();
+        let port = Serial::open(path).unwrap();
+        drop(slave);
+
+        let worker = std::thread::spawn(move || {
+            let mut request = [0u8; CONNECT.len()];
+            // Simulate a radio that ignores the first CONNECT.
+            master.read_exact(&mut request).unwrap();
+            assert_eq!(request, CONNECT);
+            master.read_exact(&mut request).unwrap();
+            assert_eq!(request, CONNECT);
+            let mut reply = vec![0; CONNECT_REPLY_LEN];
+            reply[..CONNECT_REPLY_PREFIX.len()].copy_from_slice(CONNECT_REPLY_PREFIX);
+            reply[CONNECT_REPLY_LEN - 4..].copy_from_slice(&[0xff, 0xff, 0x55, 0xaa]);
+            master.write_all(&[0x00, 0xff, 0x5f]).unwrap();
+            master.write_all(&reply[1..40]).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            master.write_all(&reply[40..]).unwrap();
+            // Keep the PTY alive until the serial reader has consumed the reply.
+            std::thread::sleep(Duration::from_millis(150));
+            reply
+        });
+        let reply = connect(&port, false).unwrap();
+        assert_eq!(reply, worker.join().unwrap());
     }
 }

@@ -12,6 +12,11 @@ workflow.
 
 ### Fixed
 
+- Retry missed or malformed connection handshakes, preserve modem-control lines
+  between sessions, and resynchronize bounded serial replies after leading noise.
+  Reject incomplete codeplug reads and close the write port before read-back
+  verification. Codeplug write commands are never retried automatically.
+
 ## 0.2.1 - 2026-07-17
 
 ### New

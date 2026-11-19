@@ -47,7 +47,7 @@ impl Serial {
             | libc::IXON);
         tio.c_oflag &= !libc::OPOST;
         tio.c_lflag &= !(libc::ECHO | libc::ECHONL | libc::ICANON | libc::ISIG | libc::IEXTEN);
-        tio.c_cflag &= !(libc::CSIZE | libc::PARENB | libc::CSTOPB | libc::CRTSCTS);
+        tio.c_cflag &= !(libc::CSIZE | libc::PARENB | libc::CSTOPB | libc::CRTSCTS | libc::HUPCL);
         tio.c_cflag |= libc::CS8 | libc::CLOCAL | libc::CREAD;
 
         // Non-blocking-ish reads: return whatever is available; each read() call
@@ -81,6 +81,8 @@ impl Serial {
             }
         }
 
+        // Allow USB UART modem-control changes to settle before the first frame.
+        std::thread::sleep(Duration::from_millis(100));
         let s = Serial {
             fd,
             path: path.to_string(),
@@ -137,8 +139,8 @@ impl Serial {
         }
     }
 
-    /// Read up to `expected` bytes. Stops when `expected` is reached, when no new
-    /// byte arrives for `gap`, or when the total `deadline` elapses.
+    /// Read one framed response, bounded by `expected` bytes. Resynchronize
+    /// after leading noise and stop on a complete frame, an idle gap or deadline.
     pub fn read_response(
         &self,
         expected: usize,
@@ -158,6 +160,9 @@ impl Serial {
             if n > 0 {
                 out.extend_from_slice(&tmp[..n]);
                 last_progress = Instant::now();
+                if let Some(frame) = take_frame(&mut out, expected) {
+                    return Ok(frame);
+                }
             } else {
                 // Timed out waiting for a byte.
                 if !out.is_empty() && last_progress.elapsed() >= gap {
@@ -172,8 +177,73 @@ impl Serial {
     }
 }
 
+/// Resynchronize on a complete framed response after leading noise or a partial
+/// previous reply. The caller still validates the command-specific signature.
+fn take_frame(buffer: &mut Vec<u8>, max_len: usize) -> Option<Vec<u8>> {
+    loop {
+        let Some(start) = buffer.windows(2).position(|w| w == [0x5f, 0x5f]) else {
+            if buffer.last() == Some(&0x5f) {
+                buffer.drain(..buffer.len() - 1);
+            } else {
+                buffer.clear();
+            }
+            return None;
+        };
+        buffer.drain(..start);
+        if buffer.len() < 4 {
+            return None;
+        }
+        let size = u16::from_le_bytes([buffer[2], buffer[3]]) as usize + 6;
+        if size < 18 || size > max_len {
+            buffer.drain(..1);
+            continue;
+        }
+        if buffer.len() < size {
+            return None;
+        }
+        return Some(buffer.drain(..size).collect());
+    }
+}
+
 impl Drop for Serial {
     fn drop(&mut self) {
         unsafe { libc::close(self.fd) };
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::take_frame;
+
+    #[test]
+    fn reassembles_split_header_after_noise() {
+        let frame = crate::proto::CONNECT;
+        let mut bytes = vec![0x00, 0xff, 0x5f];
+        assert!(take_frame(&mut bytes, frame.len()).is_none());
+        bytes.extend_from_slice(&frame[1..14]);
+        assert!(take_frame(&mut bytes, frame.len()).is_none());
+        bytes.extend_from_slice(&frame[14..]);
+        assert_eq!(take_frame(&mut bytes, frame.len()).unwrap(), frame);
+    }
+
+    #[test]
+    fn skips_oversized_length_and_preserves_split_magic() {
+        let frame = crate::proto::CONNECT;
+        let mut bytes = vec![0x5f, 0x5f, 0xff, 0xff, 0x00, 0x5f];
+        assert!(take_frame(&mut bytes, frame.len()).is_none());
+        assert_eq!(bytes, [0x5f]);
+        bytes.extend_from_slice(&frame[1..]);
+        assert_eq!(take_frame(&mut bytes, frame.len()).unwrap(), frame);
+    }
+
+    #[test]
+    fn separates_concatenated_frames_and_rejects_bad_length() {
+        let frame = crate::proto::CONNECT;
+        let mut bytes = vec![0x5f, 0x5f, 0, 0];
+        bytes.extend_from_slice(frame);
+        bytes.extend_from_slice(frame);
+        assert_eq!(take_frame(&mut bytes, frame.len()).unwrap(), frame);
+        assert_eq!(take_frame(&mut bytes, frame.len()).unwrap(), frame);
+        assert!(bytes.is_empty());
     }
 }

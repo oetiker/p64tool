@@ -279,6 +279,7 @@ fn write_radio(
     // 5. Write.
     let s = serial::Serial::open(port)?;
     proto::write_all(&s, &frames, verbose)?;
+    drop(s);
     println!("Write complete.");
 
     // 6. Verify by reading back.
